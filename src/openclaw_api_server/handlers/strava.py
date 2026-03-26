@@ -9,15 +9,14 @@ as the only defense. The webhook callback URL should be registered as:
   https://webhooks.yourdomain.com/webhook/strava/<STRAVA_WEBHOOK_SECRET>
 """
 
-import logging
-
+import structlog
 from fastapi import APIRouter, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from openclaw_api_server.config import config
 from openclaw_api_server.gateway import forward_to_gateway
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 
@@ -37,9 +36,11 @@ async def strava_validation(
 ) -> Response:
     """Handle Strava subscription validation callback."""
     if not _validate_path_secret(path_secret):
+        logger.warning("Strava path secret mismatch on validation request")
         return Response(status_code=404)
 
     if hub_mode != "subscribe":
+        logger.warning("Unexpected hub.mode", hub_mode=hub_mode)
         return Response(status_code=400)
 
     if config.strava_verify_token and hub_verify_token != config.strava_verify_token:
@@ -54,6 +55,7 @@ async def strava_validation(
 async def strava_webhook(path_secret: str, request: Request) -> Response:
     """Handle Strava event notifications."""
     if not _validate_path_secret(path_secret):
+        logger.warning("Strava path secret mismatch on event delivery")
         return Response(status_code=404)
 
     body = await request.json()
@@ -63,7 +65,13 @@ async def strava_webhook(path_secret: str, request: Request) -> Response:
     object_id = body.get("object_id")
     owner_id = body.get("owner_id")
 
-    logger.info("Strava event: %s %s (object=%s, owner=%s)", aspect_type, object_type, object_id, owner_id)
+    logger.info(
+        "Strava event received",
+        aspect_type=aspect_type,
+        object_type=object_type,
+        object_id=object_id,
+        owner_id=owner_id,
+    )
 
     await forward_to_gateway("strava", body)
 

@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.135.2",
     "google-auth[requests]>=2.49.1",
     "httpx>=0.28.1",
+    "structlog>=25.5.0",
     "uvicorn[standard]>=0.42.0",
 ]
 

@@ -1,10 +1,11 @@
-import logging
+import os
 
 from fastapi import FastAPI
 
 from openclaw_api_server.handlers import asana, gmail, strava
+from openclaw_api_server.logging import setup_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+setup_logging(debug=os.environ.get("DEBUG", "").lower() in ("1", "true"))
 
 app = FastAPI(title="OpenClaw Webhook Receiver", version="0.1.0")
 

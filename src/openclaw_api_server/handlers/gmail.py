@@ -17,8 +17,8 @@ validate the token's signature, issuer, and audience.
 
 import base64
 import json
-import logging
 
+import structlog
 from fastapi import APIRouter, Request, Response
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
@@ -26,7 +26,7 @@ from google.oauth2 import id_token
 from openclaw_api_server.config import config
 from openclaw_api_server.gateway import forward_to_gateway
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 
@@ -38,39 +38,40 @@ def _verify_pubsub_token(request: Request) -> bool:
 
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        logger.warning("Gmail webhook: missing or invalid Authorization header")
+        logger.warning("Missing or invalid Authorization header")
         return False
 
     token = auth_header.removeprefix("Bearer ")
     try:
         claim = id_token.verify_oauth2_token(token, google_requests.Request(), audience=config.gmail_pubsub_audience)
-        logger.debug("Gmail Pub/Sub token verified: email=%s", claim.get("email"))
+        logger.debug("Pub/Sub token verified", email=claim.get("email"))
         return True
     except ValueError:
-        logger.warning("Gmail webhook: invalid JWT token")
+        logger.warning("Invalid JWT token from Pub/Sub")
         return False
 
 
 @router.post("/webhook/gmail")
 async def gmail_webhook(request: Request) -> Response:
+    logger.debug("Received Gmail webhook request")
+
     if not _verify_pubsub_token(request):
+        logger.error("Gmail webhook auth failed")
         return Response(status_code=401)
 
     body = await request.json()
-
     message = body.get("message", {})
     data_b64 = message.get("data", "")
 
     try:
         data = json.loads(base64.b64decode(data_b64))
     except (json.JSONDecodeError, ValueError):
-        logger.warning("Failed to decode Gmail Pub/Sub message data")
-        # Still return 200 to acknowledge, otherwise Pub/Sub retries
+        logger.error("Failed to decode Gmail Pub/Sub message data")
         return Response(status_code=200)
 
     email_address = data.get("emailAddress", "unknown")
     history_id = data.get("historyId", "unknown")
-    logger.info("Gmail notification: email=%s historyId=%s", email_address, history_id)
+    logger.info("Gmail notification received", email=email_address, history_id=history_id)
 
     await forward_to_gateway(
         "gmail",
@@ -81,5 +82,4 @@ async def gmail_webhook(request: Request) -> Response:
         },
     )
 
-    # Always return 200 to acknowledge the Pub/Sub message
     return Response(status_code=200)
