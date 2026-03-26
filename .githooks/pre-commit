@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -e
+
+echo "Running ruff check..."
+uv run ruff check src/ main.py
+
+echo "Running ruff format check..."
+uv run ruff format --check src/ main.py
+
+echo "Running ty type check..."
+uv run ty check src/ main.py
+
+echo "All checks passed."
