@@ -2,52 +2,67 @@
 
 ## Project Overview
 
-FastAPI webhook receiver that sits between external API push notifications (Gmail, Asana, Strava) and a local OpenClaw Gateway. Validates webhook signatures, normalizes payloads, and forwards events to the Gateway.
+OpenClaw Gateway plugin that receives webhooks from Gmail, Asana, and Strava. Validates signatures, parses payloads, and triggers wake events on the Gateway. Runs in-process with the Gateway — no separate server needed.
 
 ## Tech Stack
 
-- Python 3.13+, managed with `uv`
-- FastAPI + uvicorn for the HTTP server
-- httpx for forwarding requests to OpenClaw Gateway
-- ruff for linting and formatting
-- ty for type checking
+- TypeScript (ES2023, ESM)
+- Biome for linting and formatting
+- Vitest for testing
+- Node.js built-in crypto for HMAC validation
 
 ## Project Structure
 
 ```
-src/openclaw_api_server/
-├── app.py           # FastAPI app, mounts all routers
-├── config.py        # Env-based configuration (singleton)
-├── gateway.py       # Forwards events to OpenClaw Gateway
+src/
+├── index.ts             # Plugin entry point, registers routes on Gateway
+├── config.ts            # Env-based configuration
+├── logger.ts            # Structured console logger
 └── handlers/
-    ├── gmail.py     # Gmail Pub/Sub push handler
-    ├── asana.py     # Asana webhook handler (handshake + HMAC + events)
-    └── strava.py    # Strava webhook handler (validation + events)
+    ├── gmail.ts         # Gmail Pub/Sub push handler (OIDC JWT auth)
+    ├── asana.ts         # Asana webhook handler (handshake + HMAC-SHA256)
+    └── strava.ts        # Strava webhook handler (path secret + verify token)
+tests/
+├── gmail.test.ts
+├── asana.test.ts
+└── strava.test.ts
 ```
-
-Entrypoint: `main.py`
 
 ## Commands
 
 ```bash
-uv sync                              # Install dependencies
-uv run python main.py                # Run the server
-uv run ruff check src/ main.py       # Lint
-uv run ruff format src/ main.py      # Format
-uv run ty check src/ main.py         # Type check
+npm install                          # Install dependencies
+npm run build                        # Compile TypeScript
+npm run check                        # Lint + type check + test (all at once)
+npx biome check src/ tests/          # Lint and format check
+npx tsc --noEmit                     # Type check
+npx vitest run                       # Run tests
+```
+
+## Pre-commit Hook
+
+Located at `.githooks/pre-commit`, runs biome, tsc, and vitest. Enable with:
+```bash
+git config core.hooksPath .githooks
 ```
 
 ## Key Patterns
 
-- Each service handler is a FastAPI `APIRouter` in `handlers/`
-- All handlers forward normalized payloads through `gateway.forward_to_gateway(source, payload)`
-- Config is loaded from environment variables at import time (`config.py`)
-- Webhook endpoints always return 200 to acknowledge receipt (even on internal errors), to prevent retry storms from upstream services
+- Handlers are pure functions: take parsed input + config, return result objects (status, headers, payload)
+- No HTTP framework dependency in handlers — the plugin entry point (`index.ts`) wires handlers to Gateway routes
+- Auth validation happens before payload processing in every handler
+- Webhook endpoints return 200 to acknowledge receipt even on decode errors, to prevent retry storms
+- Secrets are never logged; Asana handshake secrets are persisted to `DATA_DIR` for restart survival
 
 ## Adding a New Service
 
-1. Create `src/openclaw_api_server/handlers/newservice.py` with a `router = APIRouter()`
-2. Add webhook endpoint(s) on the router
-3. Call `forward_to_gateway("newservice", payload)` to send events to OpenClaw
-4. Include the router in `app.py`: `app.include_router(newservice.router)`
-5. Add any config vars to `config.py` and `.env.example`
+1. Create `src/handlers/newservice.ts` with handler function(s) returning `{ status, payload? }`
+2. Add config vars to `src/config.ts`
+3. Register routes in `src/index.ts` via `api.addRoute()`
+4. Add tests in `tests/newservice.test.ts`
+
+## Plugin API
+
+The `PluginAPI` interface in `index.ts` is a minimal type definition based on OpenClaw's documented plugin capabilities. The actual API may differ — consult OpenClaw plugin docs. Key methods used:
+- `api.addRoute(method, path, handler)` — register HTTP routes
+- `api.triggerWakeEvent(source, payload)` — wake the agent with event data

@@ -1,52 +1,50 @@
-# OpenClaw API Server
+# OpenClaw Webhook Receiver
 
-Webhook receiver that accepts push notifications from external APIs and forwards them to your local [OpenClaw](https://openclaw.ai/) Gateway. Replaces expensive LLM-monitored polling with near-real-time push notifications.
+[OpenClaw](https://openclaw.ai/) Gateway plugin that receives push notifications from external APIs. Replaces expensive LLM-monitored polling with near-real-time webhooks.
 
 ## Architecture
 
 ```
 Gmail (Pub/Sub Push) ──┐
-Asana (Webhooks)    ───┼──→ Cloudflare Edge ──→ cloudflared tunnel ──→ this server (:8000) ──→ OpenClaw Gateway (:18789)
+Asana (Webhooks)    ───┼──→ Cloudflare Edge ──→ cloudflared tunnel ──→ OpenClaw Gateway (with this plugin)
 Strava (Webhooks)   ───┘
 ```
 
+This is an in-process Gateway plugin — no separate server to manage.
+
 ## Supported Services
 
-| Service | Endpoint | Method | Notes |
-|---------|----------|--------|-------|
-| Gmail | `/webhook/gmail` | POST | Google Cloud Pub/Sub push delivery |
-| Asana | `/webhook/asana` | POST | Handles handshake + HMAC-signed events |
-| Strava | `/webhook/strava` | GET/POST | GET for subscription validation, POST for events |
-| Health | `/health` | GET | Returns `{"status": "ok"}` |
+| Service | Endpoint | Method | Auth |
+|---------|----------|--------|------|
+| Gmail | `/webhook/gmail` | POST | OIDC JWT from Pub/Sub |
+| Asana | `/webhook/asana` | POST | HMAC-SHA256 signature |
+| Strava | `/webhook/strava/:secret` | GET/POST | Secret URL path segment |
 
-## Setup
-
-### Prerequisites
-
-- Python 3.13+
-- [uv](https://docs.astral.sh/uv/)
-- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/) for tunneling
-- An OpenClaw instance running locally
-
-### Install & Run
+## Installation
 
 ```bash
-# Install dependencies
-uv sync
+# Install as an OpenClaw plugin
+openclaw plugins install ./path-to-this-repo
 
-# Copy and edit environment config
-cp .env.example .env
-# Edit .env with your tokens
-
-# Run the server
-uv run python main.py
+# Or copy to extensions directory
+cp -r dist/ ~/.openclaw/extensions/webhook-receiver/
 ```
 
-The server starts on `http://0.0.0.0:8000` by default.
+## Configuration
 
-### Cloudflare Tunnel
+Set these environment variables before starting the Gateway:
 
-Expose the server to the internet without opening ports:
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ASANA_WEBHOOK_SECRET` | HMAC secret for Asana signature validation | (auto-persisted from handshake) |
+| `STRAVA_VERIFY_TOKEN` | Token for Strava subscription validation | (empty) |
+| `STRAVA_WEBHOOK_SECRET` | Secret path segment in Strava callback URL | (empty) |
+| `GMAIL_PUBSUB_AUDIENCE` | Audience for Pub/Sub OIDC JWT validation | (empty, skips auth) |
+| `DATA_DIR` | Directory for persisted state (Asana secrets) | `~/.openclaw-api-server` |
+
+## Cloudflare Tunnel
+
+Expose the Gateway to the internet without opening ports:
 
 ```bash
 brew install cloudflared
@@ -63,59 +61,51 @@ credentials-file: ~/.cloudflared/<tunnel-id>.json
 
 ingress:
   - hostname: webhooks.yourdomain.com
-    service: http://localhost:8000
+    service: http://localhost:18789
   - service: http_status:404
 ```
-
-Run the tunnel:
 
 ```bash
 cloudflared tunnel run openclaw
 ```
 
-### Registering Webhooks
+## Registering Webhooks
 
-#### Gmail (Pub/Sub Push)
+### Gmail (Pub/Sub Push)
 
 1. Enable Gmail API + Pub/Sub API in Google Cloud Console
 2. Create a Pub/Sub topic and grant publish permission to `gmail-api-push@system.gserviceaccount.com`
 3. Create a push subscription pointing to `https://webhooks.yourdomain.com/webhook/gmail`
-4. Call the Gmail API `watch()` method (must be renewed every 7 days)
+4. Set `GMAIL_PUBSUB_AUDIENCE` to the same URL for JWT validation
+5. Call the Gmail API `watch()` method (must be renewed every 7 days)
 
-#### Asana
+### Asana
 
 1. Create a webhook via Asana API with callback URL `https://webhooks.yourdomain.com/webhook/asana`
-2. The server handles the handshake automatically (echoes `X-Hook-Secret`)
-3. Optionally set `ASANA_WEBHOOK_SECRET` in `.env` for signature validation
+2. The plugin handles the handshake automatically and persists the secret
+3. Optionally set `ASANA_WEBHOOK_SECRET` to override the persisted secret
 
-#### Strava
+### Strava
 
-1. Set `STRAVA_VERIFY_TOKEN` in `.env` to a token of your choice
-2. Register a webhook subscription via Strava API using the same verify token
-3. Callback URL: `https://webhooks.yourdomain.com/webhook/strava`
+1. Set `STRAVA_VERIFY_TOKEN` and `STRAVA_WEBHOOK_SECRET` environment variables
+2. Register a webhook subscription via Strava API
+3. Callback URL: `https://webhooks.yourdomain.com/webhook/strava/<STRAVA_WEBHOOK_SECRET>`
 
 ## Development
 
 ```bash
-# Lint
-uv run ruff check src/ main.py
+npm install
+npm run check          # Lint + type check + tests
 
-# Format
-uv run ruff format src/ main.py
-
-# Type check
-uv run ty check src/ main.py
+# Individual commands
+npx biome check src/ tests/    # Lint
+npx biome check --fix src/     # Auto-fix
+npx tsc --noEmit               # Type check
+npx vitest run                 # Tests
+npx vitest                     # Tests in watch mode
 ```
 
-## Configuration
-
-All configuration is via environment variables (see `.env.example`):
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `OPENCLAW_GATEWAY_URL` | OpenClaw Gateway URL | `http://localhost:18789` |
-| `OPENCLAW_WEBHOOK_TOKEN` | Bearer token for Gateway auth | (empty) |
-| `ASANA_WEBHOOK_SECRET` | HMAC secret for Asana signature validation | (empty) |
-| `STRAVA_VERIFY_TOKEN` | Token for Strava subscription validation | (empty) |
-| `HOST` | Server bind address | `0.0.0.0` |
-| `PORT` | Server port | `8000` |
+Pre-commit hook (biome + tsc + vitest):
+```bash
+git config core.hooksPath .githooks
+```
