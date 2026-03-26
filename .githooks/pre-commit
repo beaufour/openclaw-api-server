@@ -10,4 +10,7 @@ uv run ruff format --check src/ main.py
 echo "Running ty type check..."
 uv run ty check src/ main.py
 
+echo "Running tests..."
+uv run pytest tests/ -q
+
 echo "All checks passed."
