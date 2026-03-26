@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
-echo "Running ruff check..."
-uv run ruff check src/ main.py
+echo "Running biome check..."
+npx biome check src/
 
-echo "Running ruff format check..."
-uv run ruff format --check src/ main.py
-
-echo "Running ty type check..."
-uv run ty check src/ main.py
-
-echo "Running tests..."
-uv run pytest tests/ -q
+echo "Running tsc type check..."
+npx tsc --noEmit
 
 echo "All checks passed."
