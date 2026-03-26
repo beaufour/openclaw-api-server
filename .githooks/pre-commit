@@ -2,9 +2,12 @@
 set -e
 
 echo "Running biome check..."
-npx biome check src/
+npx biome check src/ tests/
 
 echo "Running tsc type check..."
 npx tsc --noEmit
+
+echo "Running tests..."
+npx vitest run
 
 echo "All checks passed."
