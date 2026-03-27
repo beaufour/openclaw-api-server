@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Config } from "../src/config.js";
 import {
+	type EmailHeadersFetcher,
 	handleGmailWebhook,
 	type JwtVerifier,
 	verifyAuthHeader,
@@ -15,6 +16,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 		stravaVerifyToken: "",
 		stravaWebhookSecret: "",
 		gmailPubsubAudience: "",
+		gmailRequireDkim: false,
+		gmailSenderAllowlist: [],
 		dataDir: "/tmp/test-data",
 		...overrides,
 	};
@@ -214,5 +217,135 @@ describe("Gmail Webhook", () => {
 		expect(result.status).toBe(200);
 		expect(result.payload?.email_address).toBe("unknown");
 		expect(result.payload?.history_id).toBe("unknown");
+	});
+});
+
+describe("Gmail DKIM Integration", () => {
+	const dkimFetcher: EmailHeadersFetcher = {
+		fetchHeaders: async () => ({
+			from: "boss@company.com",
+			authenticationResults: "mx.google.com; dkim=pass header.d=company.com",
+		}),
+	};
+
+	const dkimFailFetcher: EmailHeadersFetcher = {
+		fetchHeaders: async () => ({
+			from: "spammer@evil.com",
+			authenticationResults: "mx.google.com; dkim=fail header.d=evil.com",
+		}),
+	};
+
+	const nullFetcher: EmailHeadersFetcher = {
+		fetchHeaders: async () => null,
+	};
+
+	it("forwards email when DKIM passes and sender is allowlisted", async () => {
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailSenderAllowlist: [
+				{ fromEmail: "boss@company.com", dkimDomain: "company.com" },
+			],
+		});
+		const body = gmailBody("me@gmail.com", "100");
+		const result = await handleGmailWebhook(
+			body,
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			dkimFetcher,
+		);
+		expect(result.status).toBe(200);
+		expect(result.payload).toBeDefined();
+	});
+
+	it("drops email when DKIM fails", async () => {
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailSenderAllowlist: [],
+		});
+		const body = gmailBody("me@gmail.com", "101");
+		const result = await handleGmailWebhook(
+			body,
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			dkimFailFetcher,
+		);
+		expect(result.status).toBe(200);
+		expect(result.payload).toBeUndefined();
+	});
+
+	it("drops email when sender not in allowlist", async () => {
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailSenderAllowlist: [
+				{ fromEmail: "other@company.com", dkimDomain: "company.com" },
+			],
+		});
+		const body = gmailBody("me@gmail.com", "102");
+		const result = await handleGmailWebhook(
+			body,
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			dkimFetcher,
+		);
+		expect(result.status).toBe(200);
+		expect(result.payload).toBeUndefined();
+	});
+
+	it("drops email when headers cannot be fetched", async () => {
+		const config = makeConfig({
+			gmailRequireDkim: true,
+		});
+		const body = gmailBody("me@gmail.com", "103");
+		const result = await handleGmailWebhook(
+			body,
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			nullFetcher,
+		);
+		expect(result.status).toBe(200);
+		expect(result.payload).toBeUndefined();
+	});
+
+	it("allows email when DKIM passes and no allowlist configured", async () => {
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailSenderAllowlist: [],
+		});
+		const body = gmailBody("me@gmail.com", "104");
+		const result = await handleGmailWebhook(
+			body,
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			dkimFetcher,
+		);
+		expect(result.status).toBe(200);
+		expect(result.payload).toBeDefined();
+	});
+
+	it("skips DKIM check when gmailRequireDkim is false", async () => {
+		const config = makeConfig({
+			gmailRequireDkim: false,
+		});
+		const body = gmailBody("me@gmail.com", "105");
+		const result = await handleGmailWebhook(
+			body,
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			dkimFailFetcher, // would fail if checked
+		);
+		expect(result.status).toBe(200);
+		expect(result.payload).toBeDefined();
 	});
 });

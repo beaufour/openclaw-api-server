@@ -11,13 +11,18 @@
  *   "subscription": "projects/.../subscriptions/..."
  * }
  *
- * Auth: Pub/Sub push subscriptions can be configured with an OIDC token.
- * When enabled, Pub/Sub sends a JWT bearer token in the Authorization header.
- * We validate the token using Google's public keys.
+ * Auth layers:
+ * 1. OIDC JWT token from Pub/Sub (validates the push notification is from Google)
+ * 2. DKIM verification (validates the email sender via Gmail's Authentication-Results)
+ * 3. Sender allowlist (restricts which From + DKIM domain pairs trigger agent actions)
+ *
+ * For DKIM, we don't re-verify signatures ourselves — Gmail already did that.
+ * We fetch the email headers via an EmailHeadersFetcher and check what Gmail computed.
  */
 
 import type { Config } from "../config.js";
 import type { Logger } from "../logger.js";
+import { checkSenderAuth } from "./dkim.js";
 
 export interface GmailPubSubMessage {
 	message: {
@@ -44,6 +49,23 @@ export interface GmailHandlerResult {
 
 export interface JwtVerifier {
 	verify(token: string, audience: string): Promise<{ email?: string }>;
+}
+
+/**
+ * Interface for fetching email headers from Gmail API.
+ * The implementation should use the Gmail API to retrieve
+ * the email's From and Authentication-Results headers.
+ */
+export interface EmailHeadersFetcher {
+	fetchHeaders(
+		emailAddress: string,
+		historyId: string,
+	): Promise<EmailHeaders | null>;
+}
+
+export interface EmailHeaders {
+	from: string;
+	authenticationResults: string;
 }
 
 export function verifyAuthHeader(
@@ -81,6 +103,7 @@ export async function handleGmailWebhook(
 	config: Config,
 	verifier: JwtVerifier,
 	logger: Logger,
+	headersFetcher?: EmailHeadersFetcher,
 ): Promise<GmailHandlerResult> {
 	logger.debug("Received Gmail webhook request");
 
@@ -111,6 +134,37 @@ export async function handleGmailWebhook(
 		email: emailAddress,
 		history_id: historyId,
 	});
+
+	// DKIM verification + sender allowlist check
+	if (config.gmailRequireDkim && headersFetcher) {
+		const headers = await headersFetcher.fetchHeaders(emailAddress, historyId);
+
+		if (!headers) {
+			logger.warn("Could not fetch email headers for DKIM check, dropping", {
+				history_id: historyId,
+			});
+			return { status: 200 };
+		}
+
+		const senderOk = checkSenderAuth(
+			headers.authenticationResults,
+			headers.from,
+			config.gmailRequireDkim,
+			config.gmailSenderAllowlist,
+			logger,
+		);
+
+		if (!senderOk) {
+			logger.info("Email rejected by DKIM/allowlist check", {
+				history_id: historyId,
+			});
+			return { status: 200 };
+		}
+	} else if (config.gmailRequireDkim && !headersFetcher) {
+		logger.warn(
+			"GMAIL_REQUIRE_DKIM is true but no EmailHeadersFetcher configured, skipping DKIM check",
+		);
+	}
 
 	return {
 		status: 200,
