@@ -194,51 +194,18 @@ fi
 
 # Create OAuth client if we need new credentials
 if [[ ! -f "$CREDENTIALS_FILE" ]]; then
+    # OAuth client creation can't be automated via gcloud or API reliably.
+    # The user must create one manually in the GCP console.
     echo ""
-    echo "    Creating OAuth2 client in GCP project..."
-
-    # Check if client already exists
-    EXISTING_CLIENT=$(gcloud alpha iap oauth-clients list 2>/dev/null | grep "$OAUTH_CLIENT_NAME" || true)
-    if [[ -z "$EXISTING_CLIENT" ]]; then
-        # Create OAuth client ID via API (gcloud doesn't have a direct command for this)
-        # We need to use the API directly
-        GCP_ACCESS_TOKEN=$(gcloud auth print-access-token)
-
-        # Create OAuth2 client
-        CLIENT_RESPONSE=$(curl -s -X POST \
-            "https://oauth2.googleapis.com/v1/projects/${PROJECT}/oauthClients" \
-            -H "Authorization: Bearer ${GCP_ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{}" 2>/dev/null || echo "")
-
-        # If the API approach doesn't work, fall back to manual
-        if [[ -z "$CLIENT_RESPONSE" ]] || echo "$CLIENT_RESPONSE" | jq -e '.error' &>/dev/null; then
-            echo ""
-            echo "    Automatic OAuth client creation isn't available."
-            echo "    Please create one manually:"
-            echo ""
-            echo "    1. Go to: https://console.cloud.google.com/apis/credentials?project=${PROJECT}"
-            echo "    2. Click '+ CREATE CREDENTIALS' > 'OAuth client ID'"
-            echo "    3. Application type: 'Desktop app'"
-            echo "    4. Name: '${OAUTH_CLIENT_NAME}'"
-            echo "    5. Click 'Create'"
-            echo ""
-            read -rp "    Enter Client ID: " CLIENT_ID
-            read -rp "    Enter Client Secret: " CLIENT_SECRET
-        else
-            CLIENT_ID=$(echo "$CLIENT_RESPONSE" | jq -r '.clientId')
-            CLIENT_SECRET=$(echo "$CLIENT_RESPONSE" | jq -r '.clientSecret')
-            echo "    OAuth client created: ${CLIENT_ID}"
-        fi
-    fi
-
-    # If we still don't have credentials, do the OAuth flow
-    if [[ -z "${CLIENT_ID:-}" ]]; then
-        echo ""
-        echo "    No client ID available. Please provide OAuth client credentials."
-        read -rp "    Enter Client ID: " CLIENT_ID
-        read -rp "    Enter Client Secret: " CLIENT_SECRET
-    fi
+    echo "    You need an OAuth2 'Desktop app' client for Gmail access."
+    echo "    Create one (or reuse an existing one) at:"
+    echo ""
+    echo "    https://console.cloud.google.com/apis/credentials?project=${PROJECT}"
+    echo ""
+    echo "    Steps: '+ CREATE CREDENTIALS' > 'OAuth client ID' > 'Desktop app'"
+    echo ""
+    read -rp "    Enter Client ID: " CLIENT_ID
+    read -rp "    Enter Client Secret: " CLIENT_SECRET
 
     # Build authorization URL
     AUTH_URL="https://accounts.google.com/o/oauth2/v2/auth"
