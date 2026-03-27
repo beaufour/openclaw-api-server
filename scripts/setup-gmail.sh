@@ -133,8 +133,9 @@ gcloud projects add-iam-policy-binding "$PROJECT" \
     --condition=None \
     --quiet >/dev/null
 
-# Update subscription to use OIDC token
+# Update subscription to use OIDC token (must include --push-endpoint alongside auth flags)
 gcloud pubsub subscriptions update "$SUBSCRIPTION_NAME" \
+    --push-endpoint="$WEBHOOK_URL" \
     --push-auth-service-account="$PUSH_SA_EMAIL" \
     --push-auth-token-audience="$WEBHOOK_URL" \
     --quiet
