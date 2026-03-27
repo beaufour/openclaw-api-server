@@ -16,7 +16,7 @@ This is an in-process Gateway plugin — no separate server to manage.
 
 | Service | Endpoint | Method | Auth |
 |---------|----------|--------|------|
-| Gmail | `/webhook/gmail` | POST | OIDC JWT from Pub/Sub |
+| Gmail | `/webhook/gmail` | POST | OIDC JWT from Pub/Sub + optional DKIM/allowlist |
 | Asana | `/webhook/asana` | POST | HMAC-SHA256 signature |
 | Strava | `/webhook/strava/:secret` | GET/POST | Secret URL path segment |
 
@@ -40,7 +40,8 @@ Set these environment variables before starting the Gateway:
 | `STRAVA_VERIFY_TOKEN` | Token for Strava subscription validation | (empty) |
 | `STRAVA_WEBHOOK_SECRET` | Secret path segment in Strava callback URL | (empty) |
 | `GMAIL_PUBSUB_AUDIENCE` | Audience for Pub/Sub OIDC JWT validation | (empty, skips auth) |
-| `DATA_DIR` | Directory for persisted state (Asana secrets) | `~/.openclaw-api-server` |
+| `GMAIL_REQUIRE_DKIM` | Set to `true` to verify DKIM and check sender allowlist | `false` |
+| `DATA_DIR` | Directory for persisted state (Asana secrets, allowlist) | `~/.openclaw-api-server` |
 
 ## Cloudflare Tunnel
 
@@ -78,6 +79,21 @@ cloudflared tunnel run openclaw
 3. Create a push subscription pointing to `https://webhooks.yourdomain.com/webhook/gmail`
 4. Set `GMAIL_PUBSUB_AUDIENCE` to the same URL for JWT validation
 5. Call the Gmail API `watch()` method (must be renewed every 7 days)
+
+#### DKIM Verification & Sender Allowlist (optional)
+
+Set `GMAIL_REQUIRE_DKIM=true` to verify that incoming emails pass DKIM. Gmail already verifies DKIM on receipt — this plugin reads the `Authentication-Results` header via the Gmail API to check the result.
+
+To restrict which senders can trigger agent actions, create `DATA_DIR/gmail_sender_allowlist.json`:
+
+```json
+[
+  { "fromEmail": "boss@company.com", "dkimDomain": "company.com" },
+  { "fromEmail": "alerts@monitoring.io", "dkimDomain": "monitoring.io" }
+]
+```
+
+Both the From email **and** the DKIM signing domain must match an entry. If the allowlist file is empty or missing, all DKIM-passing emails are allowed through.
 
 ### Asana
 

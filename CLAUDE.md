@@ -19,11 +19,13 @@ src/
 ├── config.ts            # Env-based configuration
 ├── logger.ts            # Structured console logger
 └── handlers/
-    ├── gmail.ts         # Gmail Pub/Sub push handler (OIDC JWT auth)
+    ├── gmail.ts         # Gmail Pub/Sub push handler (OIDC JWT auth + DKIM)
+    ├── dkim.ts          # DKIM result parsing and sender allowlist checking
     ├── asana.ts         # Asana webhook handler (handshake + HMAC-SHA256)
     └── strava.ts        # Strava webhook handler (path secret + verify token)
 tests/
-├── gmail.test.ts
+├── gmail.test.ts        # Gmail auth + DKIM integration tests
+├── dkim.test.ts         # DKIM parsing and allowlist unit tests
 ├── asana.test.ts
 └── strava.test.ts
 ```
@@ -53,6 +55,8 @@ git config core.hooksPath .githooks
 - Auth validation happens before payload processing in every handler
 - Webhook endpoints return 200 to acknowledge receipt even on decode errors, to prevent retry storms
 - Secrets are never logged; Asana handshake secrets are persisted to `DATA_DIR` for restart survival
+- Gmail DKIM check uses an `EmailHeadersFetcher` interface — the implementation fetches headers via Gmail API. The handler itself only depends on the interface, keeping it testable
+- Sender allowlist is loaded from `DATA_DIR/gmail_sender_allowlist.json` at startup. Both From email and DKIM signing domain must match
 
 ## Adding a New Service
 
