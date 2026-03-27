@@ -17,16 +17,12 @@ import {
 	handleStravaValidation,
 	handleStravaWebhook,
 } from "../src/handlers/strava.js";
+import { googleJwtVerifier } from "../src/jwt-verifier.js";
 import { createLogger } from "../src/logger.js";
 
 const config = loadConfig();
 const logger = createLogger("dev-server");
 const PORT = Number(process.env.PORT ?? 8000);
-
-// Placeholder JWT verifier — accepts everything in dev mode
-const devJwtVerifier = {
-	verify: async () => ({ email: "dev@localhost" }),
-};
 
 function readBody(req: http.IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
@@ -65,7 +61,7 @@ const server = http.createServer(async (req, res) => {
 			body,
 			req.headers.authorization,
 			config,
-			devJwtVerifier,
+			googleJwtVerifier,
 			logger,
 		);
 		if (result.payload) {
@@ -142,5 +138,7 @@ server.listen(PORT, () => {
 			"POST /webhook/strava/:secret",
 		],
 	});
-	logger.info("JWT validation is DISABLED in dev mode");
+	if (!config.gmailPubsubAudience) {
+		logger.warn("GMAIL_PUBSUB_AUDIENCE not set — Gmail JWT validation will be skipped");
+	}
 });
