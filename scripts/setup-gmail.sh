@@ -31,7 +31,7 @@ TOPIC_NAME="gmail-notifications"
 SUBSCRIPTION_NAME="gmail-push"
 GMAIL_PUBLISH_SA="gmail-api-push@system.gserviceaccount.com"
 OAUTH_CLIENT_NAME="gmail-webhook-client"
-GMAIL_SCOPE="https://mail.google.com/"
+GMAIL_SCOPE="https://www.googleapis.com/auth/gmail.readonly"
 REDIRECT_URI="urn:ietf:wg:oauth:2.0:oob"
 
 # --- Argument parsing ---
