@@ -166,11 +166,7 @@ server.listen(PORT, () => {
 		"DATA_DIR",
 	];
 	const set = envVars.filter((v) => process.env[v]);
-	const unset = envVars.filter((v) => !process.env[v]);
 	if (set.length > 0) {
 		logger.info("Config set:", { vars: set });
-	}
-	if (unset.length > 0) {
-		logger.warn("Config not set:", { vars: unset });
 	}
 });
