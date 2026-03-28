@@ -50,10 +50,11 @@ const logger = createLogger("webhook-server");
 const PORT = Number(process.env.PORT ?? 18790);
 const DRY_RUN = process.argv.includes("--dry-run");
 const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL ?? "http://localhost:18789";
+const HOOK_TOKEN = process.env.OPENCLAW_HOOK_TOKEN ?? "";
 
 const gateway = DRY_RUN
 	? createDryRunClient(logger)
-	: createGatewayClient(GATEWAY_URL, logger);
+	: createGatewayClient(GATEWAY_URL, HOOK_TOKEN, logger);
 
 function readBody(req: http.IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
@@ -180,6 +181,7 @@ server.listen(PORT, () => {
 		"ASANA_WEBHOOK_SECRET",
 		"GMAIL_PUBSUB_AUDIENCE",
 		"GMAIL_REQUIRE_DKIM",
+		"OPENCLAW_HOOK_TOKEN",
 		"DATA_DIR",
 	];
 	const set = envVars.filter((v) => process.env[v]);

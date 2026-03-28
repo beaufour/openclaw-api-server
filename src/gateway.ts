@@ -1,5 +1,8 @@
 /**
- * Forwards webhook events to the OpenClaw Gateway.
+ * Forwards webhook events to the OpenClaw Gateway via /hooks/wake.
+ *
+ * The wake endpoint injects a system event into the main session.
+ * The agent's heartbeat loop picks it up and decides what to do.
  */
 
 import http from "node:http";
@@ -11,12 +14,18 @@ export interface GatewayClient {
 
 export function createGatewayClient(
 	gatewayUrl: string,
+	hookToken: string,
 	logger: Logger,
 ): GatewayClient {
+	if (!hookToken) {
+		logger.error("OPENCLAW_HOOK_TOKEN not set — gateway forwarding will fail");
+	}
+
 	return {
 		async forward(source, payload) {
-			const url = new URL("/webhook", gatewayUrl);
-			const body = JSON.stringify({ source, payload });
+			const url = new URL("/hooks/wake", gatewayUrl);
+			const text = `[${source}] ${JSON.stringify(payload)}`;
+			const body = JSON.stringify({ text, mode: "now" });
 
 			return new Promise((resolve) => {
 				const req = http.request(
@@ -26,6 +35,7 @@ export function createGatewayClient(
 						headers: {
 							"Content-Type": "application/json",
 							"Content-Length": Buffer.byteLength(body),
+							Authorization: `Bearer ${hookToken}`,
 						},
 						timeout: 10_000,
 					},
@@ -36,7 +46,7 @@ export function createGatewayClient(
 							res.statusCode >= 200 &&
 							res.statusCode < 300
 						) {
-							logger.info("Forwarded event to gateway", {
+							logger.info("Forwarded wake event to gateway", {
 								source,
 								status: res.statusCode,
 							});
