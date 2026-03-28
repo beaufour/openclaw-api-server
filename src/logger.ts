@@ -13,20 +13,32 @@ function formatContext(context?: Record<string, unknown>): string {
 	return ` ${parts.join(" ")}`;
 }
 
+function timestamp(): string {
+	return new Date().toISOString().replace("T", " ").replace("Z", "");
+}
+
 export function createLogger(name: string): Logger {
 	const prefix = `[${name}]`;
 	return {
 		debug(message, context?) {
-			console.debug(`${prefix} ${message}${formatContext(context)}`);
+			console.debug(
+				`${timestamp()} ${prefix} ${message}${formatContext(context)}`,
+			);
 		},
 		info(message, context?) {
-			console.info(`${prefix} ${message}${formatContext(context)}`);
+			console.info(
+				`${timestamp()} ${prefix} ${message}${formatContext(context)}`,
+			);
 		},
 		warn(message, context?) {
-			console.warn(`${prefix} ${message}${formatContext(context)}`);
+			console.warn(
+				`${timestamp()} ${prefix} ${message}${formatContext(context)}`,
+			);
 		},
 		error(message, context?) {
-			console.error(`${prefix} ${message}${formatContext(context)}`);
+			console.error(
+				`${timestamp()} ${prefix} ${message}${formatContext(context)}`,
+			);
 		},
 	};
 }
