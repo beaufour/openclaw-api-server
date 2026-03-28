@@ -169,4 +169,13 @@ server.listen(PORT, () => {
 	if (set.length > 0) {
 		logger.info("Config set:", { vars: set });
 	}
+
+	// Check for persisted Asana secret
+	if (!config.asanaWebhookSecret) {
+		const { getSecret } = await import("../src/handlers/asana.js");
+		const persisted = getSecret(config);
+		if (persisted) {
+			logger.info("Asana webhook secret loaded from persisted file");
+		}
+	}
 });
