@@ -1,8 +1,8 @@
 /**
- * Forwards webhook events to the OpenClaw Gateway via /hooks/wake.
+ * Forwards webhook events to the OpenClaw Gateway via /hooks/<source>.
  *
- * The wake endpoint injects a system event into the main session.
- * The agent's heartbeat loop picks it up and decides what to do.
+ * Each source (gmail, asana, strava) gets its own mapped endpoint,
+ * allowing per-service agent configuration in OpenClaw's hooks.mappings.
  */
 
 import http from "node:http";
@@ -23,9 +23,8 @@ export function createGatewayClient(
 
 	return {
 		async forward(source, payload) {
-			const url = new URL("/hooks/wake", gatewayUrl);
-			const envelope = { type: source, ...payload };
-			const text = JSON.stringify(envelope);
+			const url = new URL(`/hooks/${source}`, gatewayUrl);
+			const text = JSON.stringify(payload);
 			const body = JSON.stringify({ text, mode: "now" });
 
 			return new Promise((resolve) => {
@@ -47,7 +46,7 @@ export function createGatewayClient(
 							res.statusCode >= 200 &&
 							res.statusCode < 300
 						) {
-							logger.info("Forwarded wake event to gateway", {
+							logger.info("Forwarded event to gateway", {
 								source,
 								status: res.statusCode,
 							});
