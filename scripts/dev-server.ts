@@ -7,8 +7,27 @@
  * Prints received payloads to stdout instead of triggering wake events.
  */
 
+import { readFileSync } from "node:fs";
 import http from "node:http";
 import { loadConfig } from "../src/config.js";
+
+// Load .env file if it exists
+try {
+	const envFile = readFileSync(".env", "utf-8");
+	for (const line of envFile.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		const eqIdx = trimmed.indexOf("=");
+		if (eqIdx === -1) continue;
+		const key = trimmed.slice(0, eqIdx);
+		const value = trimmed.slice(eqIdx + 1);
+		if (!(key in process.env)) {
+			process.env[key] = value;
+		}
+	}
+} catch {
+	// No .env file, that's fine
+}
 import { handleAsanaWebhook } from "../src/handlers/asana.js";
 import type { GmailPubSubMessage } from "../src/handlers/gmail.js";
 import { handleGmailWebhook } from "../src/handlers/gmail.js";
