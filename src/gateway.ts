@@ -16,6 +16,7 @@ export function createGatewayClient(
 	gatewayUrl: string,
 	hookToken: string,
 	logger: Logger,
+	logPayload = false,
 ): GatewayClient {
 	if (!hookToken) {
 		logger.error("OPENCLAW_HOOK_TOKEN not set — gateway forwarding will fail");
@@ -23,9 +24,14 @@ export function createGatewayClient(
 
 	return {
 		async forward(source, payload) {
-			const url = new URL(`/hooks/${source}`, gatewayUrl);
+			const path = `/hooks/${source}`;
+			const url = new URL(path, gatewayUrl);
 			const text = JSON.stringify(payload);
 			const body = JSON.stringify({ text, mode: "now" });
+
+			if (logPayload) {
+				logger.info(`Payload for ${path}`, { payload });
+			}
 
 			return new Promise((resolve) => {
 				const req = http.request(
@@ -46,14 +52,12 @@ export function createGatewayClient(
 							res.statusCode >= 200 &&
 							res.statusCode < 300
 						) {
-							logger.info("Forwarded event to gateway", {
-								source,
+							logger.info(`Forwarded event to gateway (${path})`, {
 								status: res.statusCode,
 							});
 							resolve(true);
 						} else {
-							logger.error("Gateway returned error", {
-								source,
+							logger.error(`Gateway returned error (${path})`, {
 								status: res.statusCode,
 							});
 							resolve(false);
@@ -62,8 +66,7 @@ export function createGatewayClient(
 				);
 
 				req.on("error", (err) => {
-					logger.error("Failed to forward event to gateway", {
-						source,
+					logger.error(`Failed to forward event to gateway (${path})`, {
 						error: err.message,
 					});
 					resolve(false);
