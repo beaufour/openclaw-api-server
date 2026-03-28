@@ -12,7 +12,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "dev": "npx tsx --watch scripts/dev-server.ts",
+    "start": "npx tsx scripts/server.ts",
+    "dev": "npx tsx --watch scripts/server.ts --dry-run",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "biome check src/ tests/",
