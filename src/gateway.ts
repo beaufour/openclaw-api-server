@@ -24,7 +24,8 @@ export function createGatewayClient(
 	return {
 		async forward(source, payload) {
 			const url = new URL("/hooks/wake", gatewayUrl);
-			const text = `[${source}] ${JSON.stringify(payload)}`;
+			const envelope = { type: source, ...payload };
+			const text = JSON.stringify(envelope);
 			const body = JSON.stringify({ text, mode: "now" });
 
 			return new Promise((resolve) => {
