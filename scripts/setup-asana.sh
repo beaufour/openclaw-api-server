@@ -135,7 +135,8 @@ for GID in $PROJECT_GIDS; do
                 \"filters\": [
                     {\"resource_type\": \"task\", \"action\": \"changed\"},
                     {\"resource_type\": \"task\", \"action\": \"added\"},
-                    {\"resource_type\": \"task\", \"action\": \"removed\"}
+                    {\"resource_type\": \"task\", \"action\": \"removed\"},
+                    {\"resource_type\": \"story\", \"action\": \"added\"}
                 ]
             }
         }")
