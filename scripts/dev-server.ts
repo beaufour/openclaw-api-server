@@ -157,7 +157,20 @@ server.listen(PORT, () => {
 			"POST /webhook/strava/:secret",
 		],
 	});
-	if (!config.gmailPubsubAudience) {
-		logger.warn("GMAIL_PUBSUB_AUDIENCE not set — Gmail JWT validation will be skipped");
+	const envVars = [
+		"STRAVA_WEBHOOK_SECRET",
+		"STRAVA_VERIFY_TOKEN",
+		"ASANA_WEBHOOK_SECRET",
+		"GMAIL_PUBSUB_AUDIENCE",
+		"GMAIL_REQUIRE_DKIM",
+		"DATA_DIR",
+	];
+	const set = envVars.filter((v) => process.env[v]);
+	const unset = envVars.filter((v) => !process.env[v]);
+	if (set.length > 0) {
+		logger.info("Config set:", { vars: set });
+	}
+	if (unset.length > 0) {
+		logger.warn("Config not set:", { vars: unset });
 	}
 });
