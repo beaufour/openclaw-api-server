@@ -2,3 +2,10 @@ node_modules/
 dist/
 .env
 *.tsbuildinfo
+
+# Local Claude Code settings
+.claude/
+
+# Editor backups / autosaves
+*~
+\#*\#
