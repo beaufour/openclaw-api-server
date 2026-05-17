@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  OpenClaw Gateway as a STANDALONE system LaunchDaemon (:18789).
+
+  We author this plist ourselves instead of copy-converting OpenClaw's
+  generated per-user LaunchAgent. It invokes only STABLE paths:
+
+    - the env-wrapper + env file under ~openclaw/.openclaw/service-env/
+      (fixed names; OpenClaw rewrites their *contents* in place)
+    - the brew `opt` node symlink (stable across node upgrades)
+    - the npm-global openclaw entrypoint (overwritten in place by
+      `openclaw update`)
+
+  so `openclaw update` only needs `launchctl kickstart -k` to pick up new
+  code -- no per-update plist resync, and no per-user LaunchAgent that has
+  to be created-then-disabled.
+
+  OPENCLAW_SERVICE_REPAIR_POLICY=external tells any `openclaw doctor` that
+  the gateway is supervised externally, so it will NOT install/start/repair
+  a competing per-user LaunchAgent. install-gateway-daemon.sh also exports
+  it from ~openclaw/.zshenv for the shell that runs `openclaw update`.
+
+  Edit this file then re-run: sudo ./deploy/install-gateway-daemon.sh
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>ai.openclaw.gateway</string>
+
+	<key>UserName</key>
+	<string>openclaw</string>
+	<key>GroupName</key>
+	<string>staff</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/openclaw/.openclaw/service-env/ai.openclaw.gateway-env-wrapper.sh</string>
+		<string>/Users/openclaw/.openclaw/service-env/ai.openclaw.gateway.env</string>
+		<string>/opt/homebrew/opt/node/bin/node</string>
+		<string>/Users/openclaw/.npm-global/lib/node_modules/openclaw/dist/index.js</string>
+		<string>gateway</string>
+		<string>--port</string>
+		<string>18789</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>OPENCLAW_SERVICE_REPAIR_POLICY</key>
+		<string>external</string>
+	</dict>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/openclaw/.openclaw</string>
+
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+
+	<!-- A boot daemon must be Standard (Interactive is an Aqua-session concept). -->
+	<key>ProcessType</key>
+	<string>Standard</string>
+
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>ExitTimeOut</key>
+	<integer>20</integer>
+	<!-- 0o077: keep gateway-written files private to the openclaw account. -->
+	<key>Umask</key>
+	<integer>63</integer>
+
+	<key>StandardOutPath</key>
+	<string>/Users/openclaw/.openclaw/logs/gateway.log</string>
+	<!-- OpenClaw discards gateway stderr by design; use `openclaw logs`. -->
+	<key>StandardErrorPath</key>
+	<string>/dev/null</string>
+</dict>
+</plist>

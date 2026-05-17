@@ -17,6 +17,19 @@ LaunchAgents need a logged-in GUI session. OpenClaw's `gateway install`, the
 Ollama.app, and a manually-run `cloudflared` do not survive an unattended
 reboot. LaunchDaemons run at boot regardless of login — hence the conversions.
 
+The gateway daemon is **authored by us** (`deploy/ai.openclaw.gateway.plist`),
+*not* copy-converted from OpenClaw's generated per-user LaunchAgent. Our plist
+points only at stable paths (the `~openclaw/.openclaw/service-env` wrapper+env,
+the brew `opt` node symlink, the npm-global entrypoint), so `openclaw update`
+rewrites contents *in place* and a plain `launchctl kickstart -k` picks up the
+new code — no per-update plist resync. To stop OpenClaw resurrecting a rival
+per-user agent on `:18789`, the install also sets
+`OPENCLAW_SERVICE_REPAIR_POLICY=external` (in `~openclaw/.zshenv` and the
+daemon's `EnvironmentVariables`): `openclaw doctor` / the post-update doctor
+then skip service install/start/repair ("Gateway service is managed
+externally"). The per-user agent is additionally booted out, persistently
+disabled, and its plist moved aside as a belt-and-suspenders backstop.
+
 ## Prerequisites
 
 - `pmset -g | grep autorestart` → `autorestart 1` (powers on after AC loss).
@@ -58,7 +71,12 @@ cd /Users/openclaw/openclaw-api-server/main/deploy
 # 2. Webhook receiver  (:18790)
 sudo ./install-daemon.sh ./us.yigle.openclaw-webhook.plist
 
-# 3. Gateway  (:18789) — converts OpenClaw's generated agent, disables it
+# 3. Gateway  (:18789) — installs OUR plist, sets the external repair
+#    policy, neutralizes any per-user agent. Re-run only on first install
+#    or an OpenClaw label/wrapper-layout change (see Maintenance), NOT on
+#    every update. Needs the service-env files to already exist: if this is
+#    a brand-new host, run `openclaw gateway install` ONCE as openclaw first
+#    to generate them, then this — and never `gateway install` again.
 sudo ./install-gateway-daemon.sh
 
 # 4. Ollama  (:11434) — after `brew install ollama` + removing Ollama.app.
@@ -117,10 +135,38 @@ sudo tail -f /Users/openclaw/Library/Logs/openclaw-webhook.log \
              /Users/openclaw/Library/Logs/openclaw-webhook.err.log
 ```
 
+## Updating OpenClaw
+
+`openclaw update` only bumps the npm package; it does **not** need a plist
+resync anymore, and the external repair policy stops it (and the post-update
+`doctor`) from re-arming a per-user agent. Procedure:
+
+```sh
+sudo -iu openclaw openclaw update                       # as openclaw
+sudo launchctl kickstart -k system/ai.openclaw.gateway  # as root: load new code
+curl -s localhost:18789/health || sudo -u openclaw openclaw health
+```
+
+In the window between the two commands the daemon keeps serving the old code
+(fine). You do **not** run `openclaw gateway install` — ever — after the
+initial bootstrap; that command's whole job is to (re)create the per-user
+agent and it ignores the repair policy.
+
+When to re-run `sudo ./install-gateway-daemon.sh`: only on first install, or
+if a future OpenClaw release changes its **service label or env-wrapper
+layout** (not just versions/paths-in-place). Signal: after a `kickstart`,
+`sudo launchctl print system/ai.openclaw.gateway` does not show
+`state = running`, or the gateway log shows the wrapper/env file is gone.
+Then run `openclaw gateway install` once to regenerate the service-env,
+`sudo ./install-gateway-daemon.sh` to re-freeze our daemon, and confirm.
+
+Caveat: with the policy `external`, `openclaw update` may stop refreshing
+`~openclaw/.openclaw/service-env/*.env`. The values there (HOME/PATH/NODE_*/
+PORT/TMPDIR) rarely change; if a future version needs new env keys, that is
+the same "regenerate once, re-freeze" path above.
+
 ## Maintenance
 
-- After `openclaw update` / `openclaw doctor --fix` (may regenerate the
-  per-user gateway LaunchAgent): re-run `sudo ./install-gateway-daemon.sh`.
 - `brew upgrade ollama|cloudflared` keeps working — installers auto-detect
   the binary; just re-run the relevant `install-*-daemon.sh`.
 - Removed Ollama.app login item was booted out; stale brew ollama agent
