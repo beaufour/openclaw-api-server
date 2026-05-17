@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>us.yigle.openclaw-webhook</string>
+
+	<!-- LaunchDaemon: starts at true boot, no login session required.
+	     Root-launched, then drops to the openclaw service user. -->
+	<key>UserName</key>
+	<string>openclaw</string>
+	<key>GroupName</key>
+	<string>staff</string>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/openclaw/openclaw-api-server/main</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/node</string>
+		<string>/Users/openclaw/openclaw-api-server/main/node_modules/tsx/dist/cli.mjs</string>
+		<string>/Users/openclaw/openclaw-api-server/main/scripts/server.ts</string>
+	</array>
+
+	<!-- launchd gives daemons a minimal env; server.ts derives DATA_DIR
+	     from $HOME, so HOME must be set explicitly. .env is read from
+	     WorkingDirectory and supplies PORT/secrets/gateway URL. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/openclaw</string>
+		<key>DATA_DIR</key>
+		<string>/Users/openclaw/.openclaw-api-server</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>StandardOutPath</key>
+	<string>/Users/openclaw/Library/Logs/openclaw-webhook.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/openclaw/Library/Logs/openclaw-webhook.err.log</string>
+</dict>
+</plist>
