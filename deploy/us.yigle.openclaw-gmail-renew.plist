@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>us.yigle.openclaw-gmail-renew</string>
+
+	<!-- LaunchDaemon: renews the Gmail watch() subscription daily. Pub/Sub
+	     push stops after 7 days without a renewal, so a daily run gives ~6
+	     days of margin against missed firings. One-shot — no KeepAlive. -->
+	<key>UserName</key>
+	<string>openclaw</string>
+	<key>GroupName</key>
+	<string>staff</string>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/openclaw/.openclaw-api-server</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/openclaw/.openclaw-api-server/renew-gmail-watch.sh</string>
+	</array>
+
+	<!-- Script uses curl + jq. PATH needs both /opt/homebrew/bin (jq) and
+	     /usr/bin (curl). HOME must be set so any tilde expansion works. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/openclaw</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>3</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+
+	<key>StandardOutPath</key>
+	<string>/Users/openclaw/Library/Logs/openclaw-gmail-renew.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/openclaw/Library/Logs/openclaw-gmail-renew.log</string>
+</dict>
+</plist>
