@@ -140,10 +140,28 @@ export async function handleGmailWebhook(
 		const headers = await headersFetcher.fetchHeaders(emailAddress, historyId);
 
 		if (!headers) {
-			logger.warn("Could not fetch email headers for DKIM check, dropping", {
-				history_id: historyId,
-			});
-			return { status: 200 };
+			// Couldn't resolve the message (transient API error, or the agent
+			// already archived it). Fail open in monitor mode so we never drop a
+			// wake on an unverifiable fetch; only enforce mode treats this as a drop.
+			if (config.gmailDkimMode === "enforce") {
+				logger.warn(
+					"Could not fetch email headers for DKIM check, dropping (enforce)",
+					{ history_id: historyId },
+				);
+				return { status: 200 };
+			}
+			logger.warn(
+				"Could not fetch email headers for DKIM check — waking anyway (monitor)",
+				{ history_id: historyId },
+			);
+			return {
+				status: 200,
+				payload: {
+					email_address: emailAddress,
+					history_id: historyId,
+					message_id: body.message?.messageId,
+				},
+			};
 		}
 
 		const senderOk = checkSenderAuth(
@@ -155,10 +173,23 @@ export async function handleGmailWebhook(
 		);
 
 		if (!senderOk) {
-			logger.info("Email rejected by DKIM/allowlist check", {
+			if (config.gmailDkimMode === "enforce") {
+				logger.info("Email rejected by DKIM/allowlist check (enforce)", {
+					history_id: historyId,
+					from: headers.from,
+				});
+				return { status: 200 };
+			}
+			// monitor mode: surface the verdict but still wake the agent.
+			logger.warn(
+				"DKIM/allowlist check FAILED but monitor mode is on — waking anyway",
+				{ history_id: historyId, from: headers.from },
+			);
+		} else {
+			logger.info("DKIM/allowlist check passed", {
 				history_id: historyId,
+				from: headers.from,
 			});
-			return { status: 200 };
 		}
 	} else if (config.gmailRequireDkim && !headersFetcher) {
 		logger.warn(

@@ -17,6 +17,9 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 		stravaWebhookSecret: "",
 		gmailPubsubAudience: "",
 		gmailRequireDkim: false,
+		// Fixture defaults to "enforce" so the DKIM drop tests below stay
+		// meaningful; production loadConfig() defaults to "monitor".
+		gmailDkimMode: "enforce",
 		gmailSenderAllowlist: [],
 		dataDir: "/tmp/test-data",
 		...overrides,
@@ -347,5 +350,51 @@ describe("Gmail DKIM Integration", () => {
 		);
 		expect(result.status).toBe(200);
 		expect(result.payload).toBeDefined();
+	});
+});
+
+describe("Gmail DKIM monitor mode", () => {
+	const dkimFailFetcher: EmailHeadersFetcher = {
+		fetchHeaders: async () => ({
+			from: "spammer@evil.com",
+			authenticationResults: "mx.google.com; dkim=fail header.d=evil.com",
+		}),
+	};
+	const nullFetcher: EmailHeadersFetcher = { fetchHeaders: async () => null };
+
+	it("wakes the agent even when DKIM fails (monitor)", async () => {
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "monitor",
+			gmailSenderAllowlist: [],
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "200"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			dkimFailFetcher,
+		);
+		expect(result.status).toBe(200);
+		expect(result.payload).toBeDefined();
+	});
+
+	it("wakes the agent when headers cannot be fetched (monitor fails open)", async () => {
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "monitor",
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "201"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			nullFetcher,
+		);
+		expect(result.status).toBe(200);
+		expect(result.payload).toBeDefined();
+		expect(result.payload?.history_id).toBe("201");
 	});
 });

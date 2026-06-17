@@ -37,6 +37,7 @@ import { createDryRunClient, createGatewayClient } from "../src/gateway.js";
 import { handleAsanaWebhook } from "../src/handlers/asana.js";
 import type { GmailPubSubMessage } from "../src/handlers/gmail.js";
 import { handleGmailWebhook } from "../src/handlers/gmail.js";
+import { createGmailHeadersFetcher } from "../src/handlers/gmail-headers-fetcher.js";
 import type { StravaEvent } from "../src/handlers/strava.js";
 import {
 	handleStravaValidation,
@@ -50,12 +51,19 @@ const logger = createLogger("webhook-server");
 const PORT = Number(process.env.PORT ?? 18790);
 const DRY_RUN = process.argv.includes("--dry-run");
 const LOG_PAYLOAD = process.argv.includes("--log-payload");
-const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL ?? "http://localhost:18789";
+const GATEWAY_URL =
+	process.env.OPENCLAW_GATEWAY_URL ?? "http://localhost:18789";
 const HOOK_TOKEN = process.env.OPENCLAW_HOOK_TOKEN ?? "";
 
 const gateway = DRY_RUN
 	? createDryRunClient(logger)
 	: createGatewayClient(GATEWAY_URL, HOOK_TOKEN, logger, LOG_PAYLOAD);
+
+// Only build the headers fetcher when DKIM enforcement is on, so the rest of
+// the server has no dependency on Gmail OAuth credentials being present.
+const gmailHeadersFetcher = config.gmailRequireDkim
+	? createGmailHeadersFetcher({ dataDir: config.dataDir, logger })
+	: undefined;
 
 function readBody(req: http.IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
@@ -66,7 +74,10 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 	});
 }
 
-function parseUrl(url: string): { pathname: string; query: Record<string, string> } {
+function parseUrl(url: string): {
+	pathname: string;
+	query: Record<string, string>;
+} {
 	const parsed = new URL(url, "http://localhost");
 	const query: Record<string, string> = {};
 	for (const [k, v] of parsed.searchParams) {
@@ -96,6 +107,7 @@ const server = http.createServer(async (req, res) => {
 			config,
 			googleJwtVerifier,
 			logger,
+			gmailHeadersFetcher,
 		);
 		if (result.payload) {
 			await gateway.forward("gmail", result.payload);
@@ -182,6 +194,7 @@ server.listen(PORT, () => {
 		"ASANA_WEBHOOK_SECRET",
 		"GMAIL_PUBSUB_AUDIENCE",
 		"GMAIL_REQUIRE_DKIM",
+		"GMAIL_DKIM_MODE",
 		"OPENCLAW_HOOK_TOKEN",
 		"DATA_DIR",
 	];
