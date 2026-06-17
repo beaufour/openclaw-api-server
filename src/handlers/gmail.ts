@@ -61,11 +61,20 @@ export interface EmailHeadersFetcher {
 		emailAddress: string,
 		historyId: string,
 	): Promise<EmailHeaders | null>;
+	/**
+	 * Archive a message (remove it from the inbox) so a later agent run won't
+	 * sweep it up via "in:inbox is:unread". Optional: requires gmail.modify
+	 * scope. Returns true on success. Used to defuse rejected mail in enforce
+	 * mode without ever waking the agent on it.
+	 */
+	archiveMessage?(messageId: string): Promise<boolean>;
 }
 
 export interface EmailHeaders {
 	from: string;
 	authenticationResults: string;
+	/** Gmail message id of the inspected message, for archiving on reject. */
+	messageId?: string;
 }
 
 export function verifyAuthHeader(
@@ -178,6 +187,20 @@ export async function handleGmailWebhook(
 					history_id: historyId,
 					from: headers.from,
 				});
+				// Archive the rejected message so a later (legitimate) agent wake
+				// doesn't discover it via "in:inbox is:unread" and process it. Best
+				// effort — requires gmail.modify scope; logged either way.
+				if (headers.messageId && headersFetcher.archiveMessage) {
+					const archived = await headersFetcher.archiveMessage(
+						headers.messageId,
+					);
+					logger.info(
+						archived
+							? "Archived rejected message out of inbox"
+							: "Could not archive rejected message (needs gmail.modify scope?)",
+						{ history_id: historyId, message_id: headers.messageId },
+					);
+				}
 				return { status: 200 };
 			}
 			// monitor mode: surface the verdict but still wake the agent.

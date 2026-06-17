@@ -31,7 +31,10 @@ TOPIC_NAME="gmail-notifications"
 SUBSCRIPTION_NAME="gmail-push"
 GMAIL_PUBLISH_SA="gmail-api-push@system.gserviceaccount.com"
 OAUTH_CLIENT_NAME="gmail-webhook-client"
-GMAIL_SCOPE="https://www.googleapis.com/auth/gmail.readonly"
+# gmail.modify = read + archive/label (NOT send) — needed so the gate can
+# archive rejected mail out of the inbox in enforce mode. Use gmail.readonly
+# instead if you don't want archive-on-reject.
+GMAIL_SCOPE="https://www.googleapis.com/auth/gmail.modify"
 REDIRECT_URI="urn:ietf:wg:oauth:2.0:oob"
 
 # --- Argument parsing ---

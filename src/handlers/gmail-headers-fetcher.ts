@@ -226,7 +226,38 @@ export function createGmailHeadersFetcher(
 				);
 			}
 
-			return { from, authenticationResults };
+			return { from, authenticationResults, messageId };
+		},
+
+		async archiveMessage(messageId: string): Promise<boolean> {
+			const token = await getAccessToken();
+			if (!token) return false;
+			try {
+				const res = await fetchFn(`${GMAIL_API}/messages/${messageId}/modify`, {
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${token}`,
+						"Content-Type": "application/json",
+					},
+					// Removing INBOX archives it; removing UNREAD also clears the
+					// "is:unread" the agent searches on. Needs gmail.modify scope.
+					body: JSON.stringify({ removeLabelIds: ["INBOX", "UNREAD"] }),
+				});
+				if (!res.ok) {
+					logger.warn("Gmail archive request failed", {
+						messageId,
+						status: res.status,
+					});
+					return false;
+				}
+				return true;
+			} catch (err) {
+				logger.warn("Gmail archive request threw", {
+					messageId,
+					error: err instanceof Error ? err.message : String(err),
+				});
+				return false;
+			}
 		},
 	};
 }

@@ -50,6 +50,33 @@ the logs show.
 
 Now spoofed / unsigned / non-allowlisted mail is dropped before the agent wakes.
 
+## Step 2b — archive rejected mail (close the inbox-landmine gap)
+
+Dropping a message only stops it from *waking* the agent — it stays unread in
+the inbox, so the next legitimate wake (whose STEP 1 is `gog gmail search
+"in:inbox is:unread"`) would sweep it up and process it via the prompt. To
+prevent that, the server archives every message it rejects in enforce mode
+(removes INBOX + UNREAD via `messages.modify`), so it never reaches the agent.
+
+This requires the api-server's Gmail token to have **`gmail.modify`** (read +
+archive/label; still NOT send). It's read-only by default, so until you
+re-consent, rejects are logged as "Could not archive … (needs gmail.modify
+scope?)" and stay in the inbox — no regression, just no auto-archive.
+
+To enable:
+1. Re-run `scripts/setup-gmail.sh` (now requests `gmail.modify`); when it asks
+   "Use existing credentials?" answer **n** to force re-consent in the browser.
+   This rewrites `~/.openclaw-api-server/gmail_oauth_credentials.json`.
+2. `sudo launchctl kickstart -k system/us.yigle.openclaw-webhook`
+3. Confirm `gog`-free: the startup log's token still can't send (modify ⊄ send).
+
+Caveat: a *false positive* (a legit sender you forgot to allowlist) gets
+archived + marked read, so it won't sit in the inbox for you to notice. The
+allowlist is verified, so risk is low, but consider periodically checking All
+Mail, or ask to switch archive→"apply a Review label" instead of plain archive.
+Any message already stuck in the inbox from before this was enabled must be
+archived once by hand (or ask and I'll do it via the modify-scoped token).
+
 ## Step 3 — make the outbound lock deterministic (pick one; defense-in-depth today)
 
 Today the guard scripts exist and the prompt routes through them, but the agent

@@ -122,6 +122,7 @@ describe("createGmailHeadersFetcher", () => {
 		expect(headers).toEqual({
 			from: "Allan <allan@beaufour.dk>",
 			authenticationResults: ar,
+			messageId: "m1",
 		});
 	});
 
@@ -155,5 +156,43 @@ describe("createGmailHeadersFetcher", () => {
 		await fetcher.fetchHeaders("petter@beaufour.dk", "2");
 		const tokenCalls = calls.filter((u) => u.includes("/token")).length;
 		expect(tokenCalls).toBe(1);
+	});
+});
+
+describe("archiveMessage", () => {
+	it("POSTs a modify removing INBOX/UNREAD and returns true", async () => {
+		let captured: { url: string; init: RequestInit } | undefined;
+		const fetchFn = (async (
+			url: string | URL | Request,
+			init?: RequestInit,
+		) => {
+			const u = String(url);
+			if (u.includes("/token"))
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			if (u.includes("/modify")) {
+				captured = { url: u, init: init ?? {} };
+				return jsonResponse({ id: "m1" });
+			}
+			throw new Error(`unexpected url ${u}`);
+		}) as unknown as typeof fetch;
+		const fetcher = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		const ok = await fetcher.archiveMessage?.("m1");
+		expect(ok).toBe(true);
+		expect(captured?.url).toContain("/messages/m1/modify");
+		expect(captured?.init.method).toBe("POST");
+		expect(JSON.parse(String(captured?.init.body))).toEqual({
+			removeLabelIds: ["INBOX", "UNREAD"],
+		});
+	});
+
+	it("returns false on a non-ok response (e.g. insufficient scope)", async () => {
+		const fetchFn = (async (url: string | URL | Request) => {
+			const u = String(url);
+			if (u.includes("/token"))
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			return jsonResponse({}, false, 403);
+		}) as unknown as typeof fetch;
+		const fetcher = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		expect(await fetcher.archiveMessage?.("m1")).toBe(false);
 	});
 });

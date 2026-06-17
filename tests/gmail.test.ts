@@ -398,3 +398,62 @@ describe("Gmail DKIM monitor mode", () => {
 		expect(result.payload?.history_id).toBe("201");
 	});
 });
+
+describe("Gmail DKIM archive-on-reject", () => {
+	function spyFetcher(): {
+		fetcher: EmailHeadersFetcher;
+		archived: string[];
+	} {
+		const archived: string[] = [];
+		const fetcher: EmailHeadersFetcher = {
+			fetchHeaders: async () => ({
+				from: "spammer@evil.com",
+				authenticationResults: "mx.google.com; dkim=fail header.d=evil.com",
+				messageId: "MSG123",
+			}),
+			archiveMessage: async (id: string) => {
+				archived.push(id);
+				return true;
+			},
+		};
+		return { fetcher, archived };
+	}
+
+	it("archives the rejected message in enforce mode", async () => {
+		const { fetcher, archived } = spyFetcher();
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "enforce",
+			gmailSenderAllowlist: [],
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "300"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(result.payload).toBeUndefined(); // not woken
+		expect(archived).toEqual(["MSG123"]); // but archived out of inbox
+	});
+
+	it("does NOT archive in monitor mode (wakes the agent instead)", async () => {
+		const { fetcher, archived } = spyFetcher();
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "monitor",
+			gmailSenderAllowlist: [],
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "301"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(result.payload).toBeDefined();
+		expect(archived).toEqual([]);
+	});
+});
