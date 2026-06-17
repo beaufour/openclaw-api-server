@@ -203,6 +203,16 @@ server.listen(PORT, () => {
 		logger.info("Config set:", { vars: set });
 	}
 
+	// Non-sensitive effective config — actual values, so the log shows the
+	// live DKIM gate state at a glance (secrets like tokens are NOT logged).
+	logger.info("Gmail DKIM config", {
+		require_dkim: config.gmailRequireDkim,
+		mode: config.gmailDkimMode,
+		trusted_authserv: process.env.GMAIL_TRUSTED_AUTHSERV ?? "mx.google.com",
+		allowlist_entries: config.gmailSenderAllowlist.length,
+		data_dir: config.dataDir,
+	});
+
 	// Check for persisted Asana secret
 	if (!config.asanaWebhookSecret) {
 		import("../src/handlers/asana.js").then(({ getSecret }) => {
