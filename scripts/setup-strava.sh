@@ -14,7 +14,7 @@
 #   4. Prints the env vars to set
 #
 # Usage:
-#   ./scripts/setup-strava.sh <domain>
+#   ./scripts/setup-strava.sh [domain]   (domain optional if WEBHOOK_DOMAIN is in .env)
 #
 # Example:
 #   ./scripts/setup-strava.sh webhooks.example.com
@@ -25,13 +25,11 @@ STRAVA_API="https://www.strava.com/api/v3"
 
 # --- Argument parsing ---
 
-if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <domain>"
-    echo "Example: $0 webhooks.example.com"
-    exit 1
-fi
-
-DOMAIN="$1"
+# Webhook domain: optional arg overrides WEBHOOK_DOMAIN (env or .env), so you
+# don't have to pass it to every setup script. See scripts/_resolve-domain.sh.
+SETUP_DOMAIN_ARG="${1:-}"
+# shellcheck source=scripts/_resolve-domain.sh
+source "$(dirname "$0")/_resolve-domain.sh"
 
 # --- Get Strava credentials ---
 
