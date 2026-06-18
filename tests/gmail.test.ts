@@ -457,3 +457,94 @@ describe("Gmail DKIM archive-on-reject", () => {
 		expect(archived).toEqual([]);
 	});
 });
+
+describe("Gmail approved-gate sweep", () => {
+	const APPROVED = {
+		from: "Allan <allan@beaufour.dk>",
+		authenticationResults: "mx.google.com; dkim=pass header.i=@beaufour.dk",
+		messageId: "OK1",
+	};
+	const REJECTED = {
+		from: "evil@phisher.com",
+		authenticationResults: "mx.google.com; dkim=fail header.d=phisher.com",
+		messageId: "BAD1",
+	};
+	const allowlist = [
+		{ fromEmail: "allan@beaufour.dk", dkimDomain: "beaufour.dk" },
+	];
+
+	function sweepFetcher(messages: (typeof APPROVED)[]): {
+		fetcher: EmailHeadersFetcher;
+		labels: Array<{ id: string; label: string; archive: boolean }>;
+	} {
+		const labels: Array<{ id: string; label: string; archive: boolean }> = [];
+		const fetcher: EmailHeadersFetcher = {
+			fetchHeaders: async () => null,
+			listUnreadInbox: async () => messages,
+			labelMessage: async (id, label, archive = false) => {
+				labels.push({ id, label, archive });
+				return true;
+			},
+		};
+		return { fetcher, labels };
+	}
+
+	it("approves vetted mail, rejects+archives the rest, wakes once (enforce)", async () => {
+		const { fetcher, labels } = sweepFetcher([APPROVED, REJECTED]);
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "enforce",
+			gmailSenderAllowlist: allowlist,
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "400"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(labels).toEqual([
+			{ id: "OK1", label: "approved", archive: false },
+			{ id: "BAD1", label: "rejected", archive: true },
+		]);
+		expect(result.payload).toBeDefined(); // woke because something was approved
+	});
+
+	it("does NOT wake when nothing is approved", async () => {
+		const { fetcher, labels } = sweepFetcher([REJECTED]);
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "enforce",
+			gmailSenderAllowlist: allowlist,
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "401"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(result.payload).toBeUndefined();
+		expect(labels).toEqual([{ id: "BAD1", label: "rejected", archive: true }]);
+	});
+
+	it("labels rejected without archiving in monitor mode", async () => {
+		const { fetcher, labels } = sweepFetcher([REJECTED]);
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "monitor",
+			gmailSenderAllowlist: allowlist,
+		});
+		await handleGmailWebhook(
+			gmailBody("me@gmail.com", "402"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(labels).toEqual([{ id: "BAD1", label: "rejected", archive: false }]);
+	});
+});

@@ -42,6 +42,9 @@ interface MessagesListResponse {
 interface MessageGetResponse {
 	payload?: { headers?: GmailMessageHeader[] };
 }
+interface LabelsListResponse {
+	labels?: Array<{ id: string; name: string }>;
+}
 
 export interface GmailHeadersFetcherOptions {
 	dataDir: string;
@@ -99,6 +102,8 @@ export function createGmailHeadersFetcher(
 
 	let cachedToken: string | undefined;
 	let tokenExpiresAt = 0;
+	// name -> labelId cache, so we resolve/create each gate label only once.
+	const labelIdCache = new Map<string, string>();
 
 	function loadCredentials(): OAuthCredentials | null {
 		try {
@@ -182,6 +187,65 @@ export function createGmailHeadersFetcher(
 		}
 	}
 
+	async function apiPost<T>(
+		path: string,
+		token: string,
+		body: unknown,
+	): Promise<T | null> {
+		try {
+			const res = await fetchFn(`${GMAIL_API}${path}`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify(body),
+			});
+			if (!res.ok) {
+				logger.warn("Gmail API POST failed", { path, status: res.status });
+				return null;
+			}
+			return (await res.json()) as T;
+		} catch (err) {
+			logger.warn("Gmail API POST threw", {
+				path,
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return null;
+		}
+	}
+
+	/**
+	 * Resolve a user label name to its id, creating the label if it doesn't
+	 * exist. Cached. Returns null if the API call fails (e.g. missing scope).
+	 */
+	async function ensureLabel(
+		token: string,
+		name: string,
+	): Promise<string | null> {
+		const cached = labelIdCache.get(name);
+		if (cached) return cached;
+
+		const list = await apiGet<LabelsListResponse>("/labels", token);
+		const existing = list?.labels?.find((l) => l.name === name);
+		if (existing?.id) {
+			labelIdCache.set(name, existing.id);
+			return existing.id;
+		}
+
+		const created = await apiPost<{ id?: string }>("/labels", token, {
+			name,
+			labelListVisibility: "labelShow",
+			messageListVisibility: "show",
+		});
+		if (created?.id) {
+			labelIdCache.set(name, created.id);
+			return created.id;
+		}
+		logger.warn("Could not resolve or create Gmail label", { name });
+		return null;
+	}
+
 	return {
 		async fetchHeaders(
 			_emailAddress: string,
@@ -227,6 +291,51 @@ export function createGmailHeadersFetcher(
 			}
 
 			return { from, authenticationResults, messageId };
+		},
+
+		async listUnreadInbox(max = 25): Promise<EmailHeaders[]> {
+			const token = await getAccessToken();
+			if (!token) return [];
+			const list = await apiGet<MessagesListResponse>(
+				`/messages?labelIds=INBOX&labelIds=UNREAD&maxResults=${max}`,
+				token,
+			);
+			const ids = list?.messages?.map((m) => m.id) ?? [];
+			const out: EmailHeaders[] = [];
+			for (const messageId of ids) {
+				const message = await apiGet<MessageGetResponse>(
+					`/messages/${messageId}?format=metadata&metadataHeaders=From&metadataHeaders=Authentication-Results`,
+					token,
+				);
+				const headers = message?.payload?.headers;
+				if (!headers) continue;
+				out.push({
+					from: getHeader(headers, "From"),
+					authenticationResults: selectTrustedAuthResults(
+						headers,
+						trustedAuthservId,
+					),
+					messageId,
+				});
+			}
+			return out;
+		},
+
+		async labelMessage(
+			messageId: string,
+			labelName: string,
+			alsoArchive = false,
+		): Promise<boolean> {
+			const token = await getAccessToken();
+			if (!token) return false;
+			const labelId = await ensureLabel(token, labelName);
+			if (!labelId) return false;
+			const removeLabelIds = alsoArchive ? ["INBOX", "UNREAD"] : [];
+			const res = await apiPost(`/messages/${messageId}/modify`, token, {
+				addLabelIds: [labelId],
+				removeLabelIds,
+			});
+			return res !== null;
 		},
 
 		async archiveMessage(messageId: string): Promise<boolean> {

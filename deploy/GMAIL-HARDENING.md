@@ -77,6 +77,43 @@ Mail, or ask to switch archive→"apply a Review label" instead of plain archive
 Any message already stuck in the inbox from before this was enabled must be
 archived once by hand (or ask and I'll do it via the modify-scoped token).
 
+## Step 2c — approved-tag processing (close the inbox-discovery loophole)
+
+Dropping/archiving rejected mail isn't enough: the gate only sees the messages
+its push fired for. An email that arrives while the router is down (or whose
+push is missed) is never vetted, sits unread, and the agent's old STEP 1
+(`in:inbox is:unread`) would process it on the next wake. Fail-open.
+
+Fixed by flipping to a positive allowlist of *messages*:
+- The server, on each push, sweeps **every** unread inbox message, vets each,
+  and labels it `approved` (pass) or `rejected` (fail; archived in enforce).
+  It wakes the agent only when something was approved.
+- The agent processes ONLY `label:approved -label:processed`, and labels each
+  `processed` when done. A message the gate never saw is never `approved`, so
+  the agent never touches it — fail closed.
+
+Requires `gmail.modify` (same re-consent as Step 2b — labeling is `messages.modify`).
+
+Deploy order matters (the agent prompt is read live, so a wrong order causes a
+fail-closed *outage* where nothing is processed):
+1. Re-consent the token to `gmail.modify` (Step 2b) if not done.
+2. `sudo launchctl kickstart -k system/us.yigle.openclaw-webhook` — server now
+   labels `approved`/`rejected`. Send a test mail; confirm in the log:
+   `Approved message for processing …` / `Inbox vetting sweep complete approved=… rejected=…`.
+3. ONLY after you see the server labeling, swap in the new agent prompt:
+   `cp scripts/prompts/gmail.md.staged` over the live
+   `~/.openclaw/workspace/scripts/prompts/gmail.md` (the staged copy is in the
+   prompts dir as `gmail.md.staged`). It takes effect on the next agent run.
+
+Rollback: restore the previous `gmail.md` (keep a backup before swapping). The
+server-side labeling is harmless on its own; only the prompt swap changes what
+the agent processes.
+
+Note: a message that arrives during downtime now stays unprocessed until some
+later push triggers a sweep that vets it (then it's approved + processed). If
+no push ever comes, it waits — that's the safe failure. The daily
+renew-gmail-watch run does not currently sweep; ask if you want it to.
+
 ## Step 3 — make the outbound lock deterministic (pick one; defense-in-depth today)
 
 Today the guard scripts exist and the prompt routes through them, but the agent

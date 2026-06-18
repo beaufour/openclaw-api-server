@@ -196,3 +196,98 @@ describe("archiveMessage", () => {
 		expect(await fetcher.archiveMessage?.("m1")).toBe(false);
 	});
 });
+
+describe("listUnreadInbox + labelMessage", () => {
+	it("lists every unread inbox message with parsed headers", async () => {
+		const fetchFn = (async (url: string | URL | Request) => {
+			const u = String(url);
+			if (u.includes("/token"))
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			if (u.includes("/messages?labelIds=INBOX"))
+				return jsonResponse({ messages: [{ id: "a" }, { id: "b" }] });
+			if (u.includes("/messages/a"))
+				return jsonResponse({
+					payload: {
+						headers: [
+							{ name: "From", value: "x@y.com" },
+							{
+								name: "Authentication-Results",
+								value: "mx.google.com; dkim=pass header.i=@y.com",
+							},
+						],
+					},
+				});
+			if (u.includes("/messages/b"))
+				return jsonResponse({
+					payload: {
+						headers: [
+							{ name: "From", value: "z@w.com" },
+							{
+								name: "Authentication-Results",
+								value: "mx.google.com; dkim=fail",
+							},
+						],
+					},
+				});
+			throw new Error(`unexpected url ${u}`);
+		}) as unknown as typeof fetch;
+		const fetcher = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		const msgs = await fetcher.listUnreadInbox?.();
+		expect(msgs?.map((m) => m.messageId)).toEqual(["a", "b"]);
+		expect(msgs?.[0].from).toBe("x@y.com");
+		expect(msgs?.[0].authenticationResults).toContain("dkim=pass");
+	});
+
+	it("resolves an existing label id and applies it", async () => {
+		const bodies: unknown[] = [];
+		const fetchFn = (async (
+			url: string | URL | Request,
+			init?: RequestInit,
+		) => {
+			const u = String(url);
+			if (u.includes("/token"))
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			if (u.endsWith("/labels"))
+				return jsonResponse({ labels: [{ id: "Label_7", name: "approved" }] });
+			if (u.includes("/modify")) {
+				bodies.push(JSON.parse(String(init?.body)));
+				return jsonResponse({ id: "m1" });
+			}
+			throw new Error(`unexpected url ${u}`);
+		}) as unknown as typeof fetch;
+		const fetcher = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		const ok = await fetcher.labelMessage?.("m1", "approved", false);
+		expect(ok).toBe(true);
+		expect(bodies).toEqual([{ addLabelIds: ["Label_7"], removeLabelIds: [] }]);
+	});
+
+	it("creates the label if missing and archives when asked", async () => {
+		let created = false;
+		const bodies: unknown[] = [];
+		const fetchFn = (async (
+			url: string | URL | Request,
+			init?: RequestInit,
+		) => {
+			const u = String(url);
+			if (u.includes("/token"))
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			if (u.endsWith("/labels") && init?.method === "POST") {
+				created = true;
+				return jsonResponse({ id: "Label_new" });
+			}
+			if (u.endsWith("/labels")) return jsonResponse({ labels: [] });
+			if (u.includes("/modify")) {
+				bodies.push(JSON.parse(String(init?.body)));
+				return jsonResponse({ id: "m1" });
+			}
+			throw new Error(`unexpected url ${u}`);
+		}) as unknown as typeof fetch;
+		const fetcher = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		const ok = await fetcher.labelMessage?.("m1", "rejected", true);
+		expect(ok).toBe(true);
+		expect(created).toBe(true);
+		expect(bodies).toEqual([
+			{ addLabelIds: ["Label_new"], removeLabelIds: ["INBOX", "UNREAD"] },
+		]);
+	});
+});

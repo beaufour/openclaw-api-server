@@ -24,6 +24,10 @@ import type { Config } from "../config.js";
 import type { Logger } from "../logger.js";
 import { checkSenderAuth } from "./dkim.js";
 
+/** Gmail labels the gate applies. The agent processes only LABEL_APPROVED. */
+export const LABEL_APPROVED = "approved";
+export const LABEL_REJECTED = "rejected";
+
 export interface GmailPubSubMessage {
 	message: {
 		data: string;
@@ -68,6 +72,18 @@ export interface EmailHeadersFetcher {
 	 * mode without ever waking the agent on it.
 	 */
 	archiveMessage?(messageId: string): Promise<boolean>;
+	/** List every unread INBOX message with its From + trusted Auth-Results. */
+	listUnreadInbox?(max?: number): Promise<EmailHeaders[]>;
+	/**
+	 * Apply a label to a message (creating the label if needed), optionally
+	 * archiving it too. Requires gmail.modify. This is how the gate marks mail
+	 * "approved"/"rejected" so the agent processes only positively-vetted mail.
+	 */
+	labelMessage?(
+		messageId: string,
+		labelName: string,
+		alsoArchive?: boolean,
+	): Promise<boolean>;
 }
 
 export interface EmailHeaders {
@@ -144,7 +160,75 @@ export async function handleGmailWebhook(
 		history_id: historyId,
 	});
 
-	// DKIM verification + sender allowlist check
+	// Preferred model: positively vet EVERY unread inbox message and label it
+	// "approved"/"rejected". The agent processes only "approved" mail, so an
+	// email the gate never saw (router down, missed push) is never approved and
+	// never processed — fail closed. Requires a label-capable fetcher (gmail.modify).
+	if (
+		config.gmailRequireDkim &&
+		headersFetcher?.listUnreadInbox &&
+		headersFetcher.labelMessage
+	) {
+		const messages = await headersFetcher.listUnreadInbox();
+		let approved = 0;
+		let rejected = 0;
+		for (const m of messages) {
+			if (!m.messageId) continue;
+			const ok = checkSenderAuth(
+				m.authenticationResults,
+				m.from,
+				config.gmailRequireDkim,
+				config.gmailSenderAllowlist,
+				logger,
+			);
+			if (ok) {
+				const labelled = await headersFetcher.labelMessage(
+					m.messageId,
+					LABEL_APPROVED,
+					false,
+				);
+				if (labelled) {
+					approved++;
+					logger.info("Approved message for processing", {
+						from: m.from,
+						message_id: m.messageId,
+					});
+				} else {
+					logger.warn("Vetted-OK but could not apply approved label", {
+						message_id: m.messageId,
+					});
+				}
+			} else {
+				// enforce archives rejected out of the inbox; monitor leaves it
+				// in the inbox but labeled, for visibility.
+				const archive = config.gmailDkimMode === "enforce";
+				await headersFetcher.labelMessage(m.messageId, LABEL_REJECTED, archive);
+				rejected++;
+				logger.info("Rejected message", {
+					from: m.from,
+					message_id: m.messageId,
+					archived: archive,
+				});
+			}
+		}
+		logger.info("Inbox vetting sweep complete", { approved, rejected });
+		// Only wake the agent when there is newly-approved work for it.
+		if (approved === 0) {
+			return { status: 200 };
+		}
+		return {
+			status: 200,
+			payload: {
+				email_address: emailAddress,
+				history_id: historyId,
+				message_id: body.message?.messageId,
+			},
+		};
+	}
+
+	// Legacy fallback: single newest message, wake-or-drop. Used when the
+	// fetcher can't label (no gmail.modify) so the agent still relies on its
+	// own prompt-level verification + the "in:inbox is:unread" sweep.
 	if (config.gmailRequireDkim && headersFetcher) {
 		const headers = await headersFetcher.fetchHeaders(emailAddress, historyId);
 
