@@ -65,6 +65,37 @@ const gmailHeadersFetcher = config.gmailRequireDkim
 	? createGmailHeadersFetcher({ dataDir: config.dataDir, logger })
 	: undefined;
 
+// Gmail emits several Pub/Sub pushes per change (and the agent's own archive/
+// label/reply activity emits more — a feedback loop). Waking the agent on each
+// one spawns concurrent runs that double-process mail. Coalesce wakes: the
+// first fires immediately; any within the window collapse into ONE trailing
+// wake (nothing is stranded). The sweep still runs per push (idempotent), so a
+// single coalesced wake still sees every approved message.
+const GMAIL_WAKE_DEBOUNCE_MS = Number(
+	process.env.GMAIL_WAKE_DEBOUNCE_MS ?? 15000,
+);
+let lastGmailWakeMs = 0;
+let gmailWakeTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingGmailPayload: Record<string, unknown> | null = null;
+
+function fireGmailWake() {
+	lastGmailWakeMs = Date.now();
+	const p = pendingGmailPayload;
+	pendingGmailPayload = null;
+	if (p) void gateway.forward("gmail", p);
+}
+
+function scheduleGmailWake(payload: Record<string, unknown>) {
+	pendingGmailPayload = payload;
+	const since = Date.now() - lastGmailWakeMs;
+	if (since >= GMAIL_WAKE_DEBOUNCE_MS) {
+		fireGmailWake();
+		return;
+	}
+	if (gmailWakeTimer) return; // a trailing wake is already scheduled
+	gmailWakeTimer = setTimeout(fireGmailWake, GMAIL_WAKE_DEBOUNCE_MS - since);
+}
+
 function readBody(req: http.IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
@@ -110,7 +141,7 @@ const server = http.createServer(async (req, res) => {
 			gmailHeadersFetcher,
 		);
 		if (result.payload) {
-			await gateway.forward("gmail", result.payload);
+			scheduleGmailWake(result.payload);
 		}
 		res.writeHead(result.status);
 		res.end();
