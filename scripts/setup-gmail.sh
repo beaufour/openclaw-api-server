@@ -165,48 +165,65 @@ echo "    This will open a browser for the Gmail account you want to monitor."
 echo "    (This can be a DIFFERENT account from your GCP project account.)"
 echo ""
 
-# Check if we already have valid credentials
+# Reuse the existing OAuth CLIENT (id/secret) across re-consents. Changing
+# scopes only requires a NEW refresh token, not a new client — so we keep the
+# client and just redo the consent.
+CLIENT_ID=""
+CLIENT_SECRET=""
+NEED_AUTH=1
+
 if [[ -f "$CREDENTIALS_FILE" ]]; then
+    CLIENT_ID=$(jq -r '.client_id // empty' "$CREDENTIALS_FILE")
+    CLIENT_SECRET=$(jq -r '.client_secret // empty' "$CREDENTIALS_FILE")
+    REFRESH_TOKEN=$(jq -r '.refresh_token // empty' "$CREDENTIALS_FILE")
     echo "    Found existing credentials at ${CREDENTIALS_FILE}"
-    read -rp "    Use existing credentials? [Y/n] " use_existing
-    if [[ "$use_existing" != "n" && "$use_existing" != "N" ]]; then
-        # Try to refresh the token
-        CLIENT_ID=$(jq -r '.client_id' "$CREDENTIALS_FILE")
-        CLIENT_SECRET=$(jq -r '.client_secret' "$CREDENTIALS_FILE")
-        REFRESH_TOKEN=$(jq -r '.refresh_token' "$CREDENTIALS_FILE")
+    echo "      [Y] keep current token"
+    echo "      [r] re-authorize for new scopes (reuses the same OAuth client)"
+    echo "      [n] start over with a different OAuth client"
+    read -rp "    Choice? [Y/r/n] " cred_choice
 
-        TOKEN_RESPONSE=$(curl -s -X POST "https://oauth2.googleapis.com/token" \
-            -d "client_id=${CLIENT_ID}" \
-            -d "client_secret=${CLIENT_SECRET}" \
-            -d "refresh_token=${REFRESH_TOKEN}" \
-            -d "grant_type=refresh_token")
-
-        ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token // empty')
-        if [[ -n "$ACCESS_TOKEN" ]]; then
-            echo "    Token refreshed successfully."
-        else
-            echo "    Token refresh failed. Will re-authenticate."
-            rm -f "$CREDENTIALS_FILE"
-        fi
-    else
-        rm -f "$CREDENTIALS_FILE"
-    fi
+    case "$cred_choice" in
+        r|R)
+            echo "    Re-authorizing for scope: ${GMAIL_SCOPE}"
+            echo "    Reusing existing OAuth client; only the refresh token is renewed."
+            ;;
+        n|N)
+            CLIENT_ID=""
+            CLIENT_SECRET=""
+            ;;
+        *)
+            # Keep the current token — just verify the refresh still works.
+            TOKEN_RESPONSE=$(curl -s -X POST "https://oauth2.googleapis.com/token" \
+                -d "client_id=${CLIENT_ID}" \
+                -d "client_secret=${CLIENT_SECRET}" \
+                -d "refresh_token=${REFRESH_TOKEN}" \
+                -d "grant_type=refresh_token")
+            ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token // empty')
+            if [[ -n "$ACCESS_TOKEN" ]]; then
+                echo "    Token refreshed successfully."
+                NEED_AUTH=0
+            else
+                echo "    Token refresh failed — will re-authorize (reusing the client)."
+            fi
+            ;;
+    esac
 fi
 
-# Create OAuth client if we need new credentials
-if [[ ! -f "$CREDENTIALS_FILE" ]]; then
-    # OAuth client creation can't be automated via gcloud or API reliably.
-    # The user must create one manually in the GCP console.
-    echo ""
-    echo "    You need an OAuth2 'Desktop app' client for Gmail access."
-    echo "    Create one (or reuse an existing one) at:"
-    echo ""
-    echo "    https://console.cloud.google.com/apis/credentials?project=${PROJECT}"
-    echo ""
-    echo "    Steps: '+ CREATE CREDENTIALS' > 'OAuth client ID' > 'Desktop app'"
-    echo ""
-    read -rp "    Enter Client ID: " CLIENT_ID
-    read -rp "    Enter Client Secret: " CLIENT_SECRET
+if [[ "$NEED_AUTH" == "1" ]]; then
+    # Need an OAuth client. Reuse the one from the credentials file if present
+    # (re-consent / scope change); otherwise ask for a new Desktop-app client.
+    if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
+        echo ""
+        echo "    You need an OAuth2 'Desktop app' client for Gmail access."
+        echo "    Create one (or reuse an existing one) at:"
+        echo ""
+        echo "    https://console.cloud.google.com/apis/credentials?project=${PROJECT}"
+        echo ""
+        echo "    Steps: '+ CREATE CREDENTIALS' > 'OAuth client ID' > 'Desktop app'"
+        echo ""
+        read -rp "    Enter Client ID: " CLIENT_ID
+        read -rp "    Enter Client Secret: " CLIENT_SECRET
+    fi
 
     # Build authorization URL
     AUTH_URL="https://accounts.google.com/o/oauth2/v2/auth"
