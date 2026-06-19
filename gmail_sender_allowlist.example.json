@@ -1,0 +1,11 @@
+[
+  { "_comment": "Template for DATA_DIR/gmail_sender_allowlist.json. Only used when GMAIL_DKIM_MODE=enforce. Confirm each dkimDomain (the header.d= value) against monitor-mode logs BEFORE enforcing — guessed domains will drop real mail. fromEmail may be an exact address or a *@domain wildcard. The _comment field is ignored by the loader." },
+
+  { "fromEmail": "allan@beaufour.dk",            "dkimDomain": "beaufour.dk" },
+  { "fromEmail": "*@schools.nyc.gov",            "dkimDomain": "schools.nyc.gov" },
+  { "fromEmail": "*@comms.schools.nyc.gov",      "dkimDomain": "schools.nyc.gov" },
+  { "fromEmail": "notify@membershiptoolkit.com", "dkimDomain": "membershiptoolkit.com" },
+  { "fromEmail": "info@artsandathletics.org",    "dkimDomain": "artsandathletics.org" },
+  { "fromEmail": "*@asana.com",                  "dkimDomain": "asana.com" },
+  { "fromEmail": "orders@eat.grubhub.com",       "dkimDomain": "eat.grubhub.com" }
+]

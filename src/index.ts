@@ -11,25 +11,17 @@ import { handleAsanaWebhook } from "./handlers/asana.js";
 import {
 	type GmailPubSubMessage,
 	handleGmailWebhook,
-	type JwtVerifier,
 } from "./handlers/gmail.js";
 import {
 	handleStravaValidation,
 	handleStravaWebhook,
 	type StravaEvent,
 } from "./handlers/strava.js";
+import { googleJwtVerifier } from "./jwt-verifier.js";
 import { createLogger } from "./logger.js";
 
 const config = loadConfig();
 const logger = createLogger("webhook-receiver");
-
-// Placeholder JWT verifier — in production, wire up google-auth-library
-const jwtVerifier: JwtVerifier = {
-	async verify(_token: string, _audience: string) {
-		// TODO: Implement with google-auth-library's OAuth2Client.verifyIdToken()
-		throw new Error("JWT verification not yet configured");
-	},
-};
 
 /**
  * OpenClaw plugin registration.
@@ -51,7 +43,7 @@ export default {
 				req.body as unknown as GmailPubSubMessage,
 				req.headers.authorization,
 				config,
-				jwtVerifier,
+				googleJwtVerifier,
 				logger,
 			);
 			if (result.payload) {

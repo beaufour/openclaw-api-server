@@ -17,6 +17,9 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 		stravaWebhookSecret: "",
 		gmailPubsubAudience: "",
 		gmailRequireDkim: false,
+		// Fixture defaults to "enforce" so the DKIM drop tests below stay
+		// meaningful; production loadConfig() defaults to "monitor".
+		gmailDkimMode: "enforce",
 		gmailSenderAllowlist: [],
 		dataDir: "/tmp/test-data",
 		...overrides,
@@ -347,5 +350,201 @@ describe("Gmail DKIM Integration", () => {
 		);
 		expect(result.status).toBe(200);
 		expect(result.payload).toBeDefined();
+	});
+});
+
+describe("Gmail DKIM monitor mode", () => {
+	const dkimFailFetcher: EmailHeadersFetcher = {
+		fetchHeaders: async () => ({
+			from: "spammer@evil.com",
+			authenticationResults: "mx.google.com; dkim=fail header.d=evil.com",
+		}),
+	};
+	const nullFetcher: EmailHeadersFetcher = { fetchHeaders: async () => null };
+
+	it("wakes the agent even when DKIM fails (monitor)", async () => {
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "monitor",
+			gmailSenderAllowlist: [],
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "200"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			dkimFailFetcher,
+		);
+		expect(result.status).toBe(200);
+		expect(result.payload).toBeDefined();
+	});
+
+	it("wakes the agent when headers cannot be fetched (monitor fails open)", async () => {
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "monitor",
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "201"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			nullFetcher,
+		);
+		expect(result.status).toBe(200);
+		expect(result.payload).toBeDefined();
+		expect(result.payload?.history_id).toBe("201");
+	});
+});
+
+describe("Gmail DKIM archive-on-reject", () => {
+	function spyFetcher(): {
+		fetcher: EmailHeadersFetcher;
+		archived: string[];
+	} {
+		const archived: string[] = [];
+		const fetcher: EmailHeadersFetcher = {
+			fetchHeaders: async () => ({
+				from: "spammer@evil.com",
+				authenticationResults: "mx.google.com; dkim=fail header.d=evil.com",
+				messageId: "MSG123",
+			}),
+			archiveMessage: async (id: string) => {
+				archived.push(id);
+				return true;
+			},
+		};
+		return { fetcher, archived };
+	}
+
+	it("archives the rejected message in enforce mode", async () => {
+		const { fetcher, archived } = spyFetcher();
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "enforce",
+			gmailSenderAllowlist: [],
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "300"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(result.payload).toBeUndefined(); // not woken
+		expect(archived).toEqual(["MSG123"]); // but archived out of inbox
+	});
+
+	it("does NOT archive in monitor mode (wakes the agent instead)", async () => {
+		const { fetcher, archived } = spyFetcher();
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "monitor",
+			gmailSenderAllowlist: [],
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "301"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(result.payload).toBeDefined();
+		expect(archived).toEqual([]);
+	});
+});
+
+describe("Gmail approved-gate sweep", () => {
+	const APPROVED = {
+		from: "Allan <allan@beaufour.dk>",
+		authenticationResults: "mx.google.com; dkim=pass header.i=@beaufour.dk",
+		messageId: "OK1",
+	};
+	const REJECTED = {
+		from: "evil@phisher.com",
+		authenticationResults: "mx.google.com; dkim=fail header.d=phisher.com",
+		messageId: "BAD1",
+	};
+	const allowlist = [
+		{ fromEmail: "allan@beaufour.dk", dkimDomain: "beaufour.dk" },
+	];
+
+	function sweepFetcher(messages: (typeof APPROVED)[]): {
+		fetcher: EmailHeadersFetcher;
+		labels: Array<{ id: string; label: string; archive: boolean }>;
+	} {
+		const labels: Array<{ id: string; label: string; archive: boolean }> = [];
+		const fetcher: EmailHeadersFetcher = {
+			fetchHeaders: async () => null,
+			listUnreadInbox: async () => messages,
+			labelMessage: async (id, label, archive = false) => {
+				labels.push({ id, label, archive });
+				return true;
+			},
+		};
+		return { fetcher, labels };
+	}
+
+	it("approves vetted mail, rejects+archives the rest, wakes once (enforce)", async () => {
+		const { fetcher, labels } = sweepFetcher([APPROVED, REJECTED]);
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "enforce",
+			gmailSenderAllowlist: allowlist,
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "400"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(labels).toEqual([
+			{ id: "OK1", label: "approved", archive: false },
+			{ id: "BAD1", label: "rejected", archive: true },
+		]);
+		expect(result.payload).toBeDefined(); // woke because something was approved
+	});
+
+	it("does NOT wake when nothing is approved", async () => {
+		const { fetcher, labels } = sweepFetcher([REJECTED]);
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "enforce",
+			gmailSenderAllowlist: allowlist,
+		});
+		const result = await handleGmailWebhook(
+			gmailBody("me@gmail.com", "401"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(result.payload).toBeUndefined();
+		expect(labels).toEqual([{ id: "BAD1", label: "rejected", archive: true }]);
+	});
+
+	it("labels rejected without archiving in monitor mode", async () => {
+		const { fetcher, labels } = sweepFetcher([REJECTED]);
+		const config = makeConfig({
+			gmailRequireDkim: true,
+			gmailDkimMode: "monitor",
+			gmailSenderAllowlist: allowlist,
+		});
+		await handleGmailWebhook(
+			gmailBody("me@gmail.com", "402"),
+			undefined,
+			config,
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(labels).toEqual([{ id: "BAD1", label: "rejected", archive: false }]);
 	});
 });

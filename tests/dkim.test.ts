@@ -60,6 +60,26 @@ describe("parseDkimResult", () => {
 		expect(result.pass).toBe(true);
 		expect(result.domain).toBe("primary.com");
 	});
+
+	it("falls back to header.i=@domain when header.d= is absent (Gmail/Workspace)", () => {
+		// Real beaufour.dk shape: identity reported as header.i, no header.d.
+		const header =
+			"mx.google.com; dkim=pass header.i=@beaufour.dk header.s=google header.b=A5m0VQh6; arc=pass (i=1); spf=pass smtp.mailfrom=allan@beaufour.dk; dara=neutral header.i=@beaufour.dk";
+		const result = parseDkimResult(header);
+		expect(result.pass).toBe(true);
+		expect(result.domain).toBe("beaufour.dk");
+	});
+
+	it("prefers header.d= over header.i= when both are present", () => {
+		const header =
+			"mx.google.com; dkim=pass header.i=@mail.x.com header.d=x.com";
+		expect(parseDkimResult(header).domain).toBe("x.com");
+	});
+
+	it("strips a local part from header.i=user@domain", () => {
+		const header = "mx.google.com; dkim=pass header.i=bounce@asana.com";
+		expect(parseDkimResult(header).domain).toBe("asana.com");
+	});
 });
 
 describe("extractFromEmail", () => {
@@ -122,6 +142,50 @@ describe("isAllowlisted", () => {
 		expect(isAllowlisted("Boss@Company.COM", "COMPANY.COM", allowlist)).toBe(
 			true,
 		);
+	});
+
+	describe("domain wildcard entries", () => {
+		const wildcard = [
+			{ fromEmail: "*@schools.nyc.gov", dkimDomain: "schools.nyc.gov" },
+		];
+
+		it("matches any address at the wildcard domain", () => {
+			expect(
+				isAllowlisted(
+					"teacher.smith@schools.nyc.gov",
+					"schools.nyc.gov",
+					wildcard,
+				),
+			).toBe(true);
+		});
+
+		it("still requires the DKIM domain to match", () => {
+			expect(
+				isAllowlisted("teacher@schools.nyc.gov", "evil.com", wildcard),
+			).toBe(false);
+		});
+
+		it("does not match a different domain", () => {
+			expect(
+				isAllowlisted(
+					"teacher@schools.nyc.gov.evil.com",
+					"schools.nyc.gov",
+					wildcard,
+				),
+			).toBe(false);
+		});
+
+		it("does not match a lookalike suffix without the @", () => {
+			expect(
+				isAllowlisted("x@notschools.nyc.gov", "schools.nyc.gov", wildcard),
+			).toBe(false);
+		});
+
+		it("wildcard matching is case-insensitive", () => {
+			expect(
+				isAllowlisted("Teacher@Schools.NYC.gov", "schools.nyc.gov", wildcard),
+			).toBe(true);
+		});
 	});
 });
 

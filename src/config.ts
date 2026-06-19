@@ -15,6 +15,11 @@ export interface Config {
 
 	// Gmail DKIM verification
 	gmailRequireDkim: boolean;
+	// "monitor" logs the DKIM/allowlist verdict but still wakes the agent;
+	// "enforce" drops messages that fail. Defaults to "monitor" so enabling
+	// DKIM never silently swallows legitimate (e.g. unsigned) mail until the
+	// logs confirm real senders pass.
+	gmailDkimMode: "monitor" | "enforce";
 	gmailSenderAllowlist: SenderAllowlistEntry[];
 
 	// Data directory for persisted state
@@ -54,6 +59,8 @@ export function loadConfig(): Config {
 		stravaWebhookSecret: process.env.STRAVA_WEBHOOK_SECRET ?? "",
 		gmailPubsubAudience: process.env.GMAIL_PUBSUB_AUDIENCE ?? "",
 		gmailRequireDkim: process.env.GMAIL_REQUIRE_DKIM === "true",
+		gmailDkimMode:
+			process.env.GMAIL_DKIM_MODE === "enforce" ? "enforce" : "monitor",
 		gmailSenderAllowlist: loadAllowlist(dataDir),
 		dataDir,
 	};

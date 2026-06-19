@@ -24,6 +24,10 @@ import type { Config } from "../config.js";
 import type { Logger } from "../logger.js";
 import { checkSenderAuth } from "./dkim.js";
 
+/** Gmail labels the gate applies. The agent processes only LABEL_APPROVED. */
+export const LABEL_APPROVED = "approved";
+export const LABEL_REJECTED = "rejected";
+
 export interface GmailPubSubMessage {
 	message: {
 		data: string;
@@ -61,11 +65,39 @@ export interface EmailHeadersFetcher {
 		emailAddress: string,
 		historyId: string,
 	): Promise<EmailHeaders | null>;
+	/**
+	 * Archive a message (remove it from the inbox) so a later agent run won't
+	 * sweep it up via "in:inbox is:unread". Optional: requires gmail.modify
+	 * scope. Returns true on success. Used to defuse rejected mail in enforce
+	 * mode without ever waking the agent on it.
+	 */
+	archiveMessage?(messageId: string): Promise<boolean>;
+	/** List every unread INBOX message with its From + trusted Auth-Results. */
+	listUnreadInbox?(max?: number): Promise<EmailHeaders[]>;
+	/**
+	 * List only messages genuinely ADDED to the inbox since the last call
+	 * (Gmail history API + a persisted watermark), so the agent's own
+	 * archive/label/reply churn doesn't re-trigger processing. Falls back to a
+	 * full sweep on cold start / expired watermark. Preferred over listUnreadInbox.
+	 */
+	listNewInboxMessages?(): Promise<EmailHeaders[]>;
+	/**
+	 * Apply a label to a message (creating the label if needed), optionally
+	 * archiving it too. Requires gmail.modify. This is how the gate marks mail
+	 * "approved"/"rejected" so the agent processes only positively-vetted mail.
+	 */
+	labelMessage?(
+		messageId: string,
+		labelName: string,
+		alsoArchive?: boolean,
+	): Promise<boolean>;
 }
 
 export interface EmailHeaders {
 	from: string;
 	authenticationResults: string;
+	/** Gmail message id of the inspected message, for archiving on reject. */
+	messageId?: string;
 }
 
 export function verifyAuthHeader(
@@ -135,15 +167,108 @@ export async function handleGmailWebhook(
 		history_id: historyId,
 	});
 
-	// DKIM verification + sender allowlist check
+	// Preferred model: positively vet inbox messages and label them
+	// "approved"/"rejected". The agent processes only "approved" mail, so an
+	// email the gate never saw (router down, missed push) is never approved and
+	// never processed — fail closed. Requires a label-capable fetcher (gmail.modify).
+	//
+	// Prefer listNewInboxMessages (history-filtered: only mail genuinely added to
+	// the inbox since last time) so the agent's own archive/label/reply churn
+	// doesn't re-trigger us. Fall back to the full unread-inbox sweep otherwise.
+	if (
+		config.gmailRequireDkim &&
+		headersFetcher?.labelMessage &&
+		(headersFetcher.listNewInboxMessages || headersFetcher.listUnreadInbox)
+	) {
+		const messages = headersFetcher.listNewInboxMessages
+			? await headersFetcher.listNewInboxMessages()
+			: // biome-ignore lint/style/noNonNullAssertion: guarded by the if above
+				await headersFetcher.listUnreadInbox!();
+		let approved = 0;
+		let rejected = 0;
+		for (const m of messages) {
+			if (!m.messageId) continue;
+			const ok = checkSenderAuth(
+				m.authenticationResults,
+				m.from,
+				config.gmailRequireDkim,
+				config.gmailSenderAllowlist,
+				logger,
+			);
+			if (ok) {
+				const labelled = await headersFetcher.labelMessage(
+					m.messageId,
+					LABEL_APPROVED,
+					false,
+				);
+				if (labelled) {
+					approved++;
+					logger.info("Approved message for processing", {
+						from: m.from,
+						message_id: m.messageId,
+					});
+				} else {
+					logger.warn("Vetted-OK but could not apply approved label", {
+						message_id: m.messageId,
+					});
+				}
+			} else {
+				// enforce archives rejected out of the inbox; monitor leaves it
+				// in the inbox but labeled, for visibility.
+				const archive = config.gmailDkimMode === "enforce";
+				await headersFetcher.labelMessage(m.messageId, LABEL_REJECTED, archive);
+				rejected++;
+				logger.info("Rejected message", {
+					from: m.from,
+					message_id: m.messageId,
+					archived: archive,
+				});
+			}
+		}
+		logger.info("Inbox vetting sweep complete", { approved, rejected });
+		// Only wake the agent when there is newly-approved work for it.
+		if (approved === 0) {
+			return { status: 200 };
+		}
+		return {
+			status: 200,
+			payload: {
+				email_address: emailAddress,
+				history_id: historyId,
+				message_id: body.message?.messageId,
+			},
+		};
+	}
+
+	// Legacy fallback: single newest message, wake-or-drop. Used when the
+	// fetcher can't label (no gmail.modify) so the agent still relies on its
+	// own prompt-level verification + the "in:inbox is:unread" sweep.
 	if (config.gmailRequireDkim && headersFetcher) {
 		const headers = await headersFetcher.fetchHeaders(emailAddress, historyId);
 
 		if (!headers) {
-			logger.warn("Could not fetch email headers for DKIM check, dropping", {
-				history_id: historyId,
-			});
-			return { status: 200 };
+			// Couldn't resolve the message (transient API error, or the agent
+			// already archived it). Fail open in monitor mode so we never drop a
+			// wake on an unverifiable fetch; only enforce mode treats this as a drop.
+			if (config.gmailDkimMode === "enforce") {
+				logger.warn(
+					"Could not fetch email headers for DKIM check, dropping (enforce)",
+					{ history_id: historyId },
+				);
+				return { status: 200 };
+			}
+			logger.warn(
+				"Could not fetch email headers for DKIM check — waking anyway (monitor)",
+				{ history_id: historyId },
+			);
+			return {
+				status: 200,
+				payload: {
+					email_address: emailAddress,
+					history_id: historyId,
+					message_id: body.message?.messageId,
+				},
+			};
 		}
 
 		const senderOk = checkSenderAuth(
@@ -155,10 +280,37 @@ export async function handleGmailWebhook(
 		);
 
 		if (!senderOk) {
-			logger.info("Email rejected by DKIM/allowlist check", {
+			if (config.gmailDkimMode === "enforce") {
+				logger.info("Email rejected by DKIM/allowlist check (enforce)", {
+					history_id: historyId,
+					from: headers.from,
+				});
+				// Archive the rejected message so a later (legitimate) agent wake
+				// doesn't discover it via "in:inbox is:unread" and process it. Best
+				// effort — requires gmail.modify scope; logged either way.
+				if (headers.messageId && headersFetcher.archiveMessage) {
+					const archived = await headersFetcher.archiveMessage(
+						headers.messageId,
+					);
+					logger.info(
+						archived
+							? "Archived rejected message out of inbox"
+							: "Could not archive rejected message (needs gmail.modify scope?)",
+						{ history_id: historyId, message_id: headers.messageId },
+					);
+				}
+				return { status: 200 };
+			}
+			// monitor mode: surface the verdict but still wake the agent.
+			logger.warn(
+				"DKIM/allowlist check FAILED but monitor mode is on — waking anyway",
+				{ history_id: historyId, from: headers.from },
+			);
+		} else {
+			logger.info("DKIM/allowlist check passed", {
 				history_id: historyId,
+				from: headers.from,
 			});
-			return { status: 200 };
 		}
 	} else if (config.gmailRequireDkim && !headersFetcher) {
 		logger.warn(

@@ -39,9 +39,19 @@ export function parseDkimResult(authResults: string): DkimResult {
 
 	const pass = dkimMatch[1] === "pass";
 
-	// Extract the signing domain from header.d=
-	const domainMatch = authResults.match(/\bheader\.d=([^\s;]+)/);
-	const domain = domainMatch?.[1];
+	// Extract the signing domain. Prefer header.d=, but Gmail/Workspace often
+	// reports only the DKIM identity as header.i=@domain (no header.d=), e.g.
+	// "dkim=pass header.i=@beaufour.dk" — fall back to that, taking the part
+	// after the last "@" so "user@domain" and "@domain" both yield the domain.
+	let domain = authResults.match(/\bheader\.d=([^\s;]+)/)?.[1];
+	if (!domain) {
+		const identity = authResults.match(/\bheader\.i=([^\s;]+)/)?.[1];
+		if (identity) {
+			domain = identity.includes("@")
+				? identity.slice(identity.lastIndexOf("@") + 1)
+				: identity;
+		}
+	}
 
 	return { pass, domain };
 }
@@ -63,10 +73,27 @@ export function extractFromEmail(fromHeader: string): string {
 }
 
 /**
+ * Match a From address against an allowlist entry's fromEmail pattern.
+ *
+ * Supports two forms (case-insensitive):
+ * - exact address: "allan@beaufour.dk"
+ * - domain wildcard: "*@schools.nyc.gov" matches any address at that domain,
+ *   which is needed for senders (schools, etc.) that use many From addresses.
+ */
+function fromMatches(pattern: string, fromEmail: string): boolean {
+	const p = pattern.toLowerCase();
+	const from = fromEmail.toLowerCase();
+	if (p.startsWith("*@")) {
+		return from.endsWith(p.slice(1)); // ".endsWith('@domain')"
+	}
+	return p === from;
+}
+
+/**
  * Check if a sender is in the allowlist.
  *
- * Both the From email and DKIM domain must match an entry.
- * Matching is case-insensitive.
+ * Both the From email (exact or "*@domain" wildcard) and the DKIM signing
+ * domain must match an entry. Matching is case-insensitive.
  */
 export function isAllowlisted(
 	fromEmail: string,
@@ -77,12 +104,11 @@ export function isAllowlisted(
 		return true;
 	}
 
-	const normalizedFrom = fromEmail.toLowerCase();
 	const normalizedDkim = dkimDomain?.toLowerCase();
 
 	return allowlist.some(
 		(entry) =>
-			entry.fromEmail.toLowerCase() === normalizedFrom &&
+			fromMatches(entry.fromEmail, fromEmail) &&
 			entry.dkimDomain.toLowerCase() === normalizedDkim,
 	);
 }
