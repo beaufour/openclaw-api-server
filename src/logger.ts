@@ -19,26 +19,28 @@ function timestamp(): string {
 
 export function createLogger(name: string): Logger {
 	const prefix = `[${name}]`;
+	const fmt = (message: string, context?: Record<string, unknown>) =>
+		`${timestamp()} ${prefix} ${message}${formatContext(context)}`;
 	return {
 		debug(message, context?) {
-			console.debug(
-				`${timestamp()} ${prefix} ${message}${formatContext(context)}`,
-			);
+			console.log(fmt(message, context));
 		},
 		info(message, context?) {
-			console.info(
-				`${timestamp()} ${prefix} ${message}${formatContext(context)}`,
-			);
+			console.log(fmt(message, context));
 		},
+		// warn/error go to BOTH stdout (the main StandardOutPath log) and stderr
+		// (the .err.log). console.warn/error alone only reach stderr, which made
+		// operational lines like dropped-mail reasons and credential errors
+		// invisible when tailing the main log.
 		warn(message, context?) {
-			console.warn(
-				`${timestamp()} ${prefix} ${message}${formatContext(context)}`,
-			);
+			const line = fmt(message, context);
+			console.log(line);
+			console.error(line);
 		},
 		error(message, context?) {
-			console.error(
-				`${timestamp()} ${prefix} ${message}${formatContext(context)}`,
-			);
+			const line = fmt(message, context);
+			console.log(line);
+			console.error(line);
 		},
 	};
 }
