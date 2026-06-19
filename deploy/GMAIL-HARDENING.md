@@ -14,16 +14,30 @@ is cutting the *external-send* leg, enforced in code, not in the prompt.
    `mx.google.com`, ignoring sender-forged AR headers; fails closed). Wired into
    `scripts/server.ts`. Config: `GMAIL_REQUIRE_DKIM=true`, `GMAIL_DKIM_MODE=monitor`
    in `.env`.
-2. **Outbound lock (scripts).** `~/.openclaw/workspace/scripts/gmail-guard/`:
+2. **Outbound lock (scripts).** Canonical copies live in this repo at
+   `agent/gmail-guard/`; installed to `~/.openclaw/workspace/scripts/gmail-guard/`:
    - `reply-to-allan.sh` — the only sanctioned send path; recipient hardcoded to
      allan@beaufour.dk (no recipient arg to redirect).
    - `gog` — a send-guard shim: when first on PATH, blocks any `gog … send` whose
      To isn't Allan, and forbids Cc/Bcc. Pass-through for everything else.
-3. **Prompt hardening (live now).** `~/.openclaw/workspace/scripts/prompts/gmail.md`
-   adds an untrusted-content frame, `--wrap-untrusted` on all reads, routes
-   replies through `reply-to-allan.sh`, and forbids raw send / curl / credential
-   reads. The gateway reads this file per run, so it is **already in effect** on
-   the next Gmail agent run — no restart needed.
+3. **Prompt hardening.** Canonical copy at `agent/gmail.md`; installed to
+   `~/.openclaw/workspace/scripts/prompts/gmail.md`. Untrusted-content frame,
+   `--wrap-untrusted` on all reads, `approved`-only work queue, marks mail
+   `processed`+read+archived when done, routes replies through `reply-to-allan.sh`,
+   forbids raw send / curl / credential reads. The gateway reads this file per
+   run, so it takes effect on the next Gmail agent run — no restart needed.
+
+## Installing the agent assets (prompt + guard)
+
+The prompt and guard scripts are versioned here under `agent/` (source of
+truth) and **copied** into the live workspace — never symlinked, so switching
+git branches can't change your running prompt. After editing them, run:
+```
+./deploy/install-agent-assets.sh        # copies agent/* -> ~/.openclaw/workspace/scripts/...
+```
+It backs up the existing prompt (timestamped) before overwriting. Override the
+target with `OPENCLAW_WORKSPACE=/path`. No daemon restart needed for the prompt;
+the guard only binds for agents whose PATH includes the gmail-guard dir (Step 3).
 
 ## Step 1 — activate the DKIM gate (needs a restart; you must run sudo)
 

