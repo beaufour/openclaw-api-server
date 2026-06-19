@@ -36,6 +36,6 @@
     "google-auth-library": "^10.6.2"
   },
   "overrides": {
-    "vite": "^8.0.14"
+    "vite": "^8.0.16"
   }
 }
