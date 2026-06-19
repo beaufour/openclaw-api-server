@@ -75,6 +75,13 @@ export interface EmailHeadersFetcher {
 	/** List every unread INBOX message with its From + trusted Auth-Results. */
 	listUnreadInbox?(max?: number): Promise<EmailHeaders[]>;
 	/**
+	 * List only messages genuinely ADDED to the inbox since the last call
+	 * (Gmail history API + a persisted watermark), so the agent's own
+	 * archive/label/reply churn doesn't re-trigger processing. Falls back to a
+	 * full sweep on cold start / expired watermark. Preferred over listUnreadInbox.
+	 */
+	listNewInboxMessages?(): Promise<EmailHeaders[]>;
+	/**
 	 * Apply a label to a message (creating the label if needed), optionally
 	 * archiving it too. Requires gmail.modify. This is how the gate marks mail
 	 * "approved"/"rejected" so the agent processes only positively-vetted mail.
@@ -160,16 +167,23 @@ export async function handleGmailWebhook(
 		history_id: historyId,
 	});
 
-	// Preferred model: positively vet EVERY unread inbox message and label it
+	// Preferred model: positively vet inbox messages and label them
 	// "approved"/"rejected". The agent processes only "approved" mail, so an
 	// email the gate never saw (router down, missed push) is never approved and
 	// never processed — fail closed. Requires a label-capable fetcher (gmail.modify).
+	//
+	// Prefer listNewInboxMessages (history-filtered: only mail genuinely added to
+	// the inbox since last time) so the agent's own archive/label/reply churn
+	// doesn't re-trigger us. Fall back to the full unread-inbox sweep otherwise.
 	if (
 		config.gmailRequireDkim &&
-		headersFetcher?.listUnreadInbox &&
-		headersFetcher.labelMessage
+		headersFetcher?.labelMessage &&
+		(headersFetcher.listNewInboxMessages || headersFetcher.listUnreadInbox)
 	) {
-		const messages = await headersFetcher.listUnreadInbox();
+		const messages = headersFetcher.listNewInboxMessages
+			? await headersFetcher.listNewInboxMessages()
+			: // biome-ignore lint/style/noNonNullAssertion: guarded by the if above
+				await headersFetcher.listUnreadInbox!();
 		let approved = 0;
 		let rejected = 0;
 		for (const m of messages) {

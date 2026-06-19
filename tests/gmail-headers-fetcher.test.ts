@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -194,6 +194,130 @@ describe("archiveMessage", () => {
 		}) as unknown as typeof fetch;
 		const fetcher = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
 		expect(await fetcher.archiveMessage?.("m1")).toBe(false);
+	});
+});
+
+describe("listNewInboxMessages (history-filtered)", () => {
+	const statePath = () => join(dataDir, "gmail_history_state.json");
+	const clearState = () => {
+		try {
+			rmSync(statePath());
+		} catch {}
+	};
+	const watermark = () =>
+		JSON.parse(readFileSync(statePath(), "utf-8")).lastHistoryId;
+	const meta = (from: string, labelIds: string[]) => ({
+		labelIds,
+		payload: {
+			headers: [
+				{ name: "From", value: from },
+				{ name: "Authentication-Results", value: "mx.google.com; dkim=pass" },
+			],
+		},
+	});
+
+	it("cold start (no watermark): baseline sweep + records watermark", async () => {
+		clearState();
+		const fetchFn = (async (url: string | URL | Request) => {
+			const u = String(url);
+			if (u.includes("/token"))
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			if (u.includes("/profile")) return jsonResponse({ historyId: "100" });
+			if (u.includes("/messages?labelIds=INBOX"))
+				return jsonResponse({ messages: [{ id: "a" }] });
+			if (u.includes("/messages/a"))
+				return jsonResponse(meta("x@y.com", ["INBOX", "UNREAD"]));
+			throw new Error(`unexpected url ${u}`);
+		}) as unknown as typeof fetch;
+		const f = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		const msgs = await f.listNewInboxMessages?.();
+		expect(msgs?.map((m) => m.messageId)).toEqual(["a"]);
+		expect(watermark()).toBe("100");
+	});
+
+	it("with watermark: returns only INBOX adds, ignoring SENT (the agent's own mail)", async () => {
+		writeFileSync(statePath(), JSON.stringify({ lastHistoryId: "100" }));
+		const fetchFn = (async (url: string | URL | Request) => {
+			const u = String(url);
+			if (u.includes("/token"))
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			if (u.includes("/history?"))
+				return jsonResponse({
+					historyId: "150",
+					history: [
+						{
+							messagesAdded: [{ message: { id: "inb1", labelIds: ["INBOX"] } }],
+						},
+						{
+							messagesAdded: [{ message: { id: "sent1", labelIds: ["SENT"] } }],
+						},
+					],
+				});
+			if (u.includes("/messages/inb1"))
+				return jsonResponse(meta("a@b.com", ["INBOX", "UNREAD"]));
+			throw new Error(`unexpected url ${u}`);
+		}) as unknown as typeof fetch;
+		const f = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		const msgs = await f.listNewInboxMessages?.();
+		expect(msgs?.map((m) => m.messageId)).toEqual(["inb1"]);
+		expect(watermark()).toBe("150");
+	});
+
+	it("expired watermark (404): falls back to a full sweep and re-baselines", async () => {
+		writeFileSync(statePath(), JSON.stringify({ lastHistoryId: "5" }));
+		const fetchFn = (async (url: string | URL | Request) => {
+			const u = String(url);
+			if (u.includes("/token"))
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			if (u.includes("/history?")) return jsonResponse({}, false, 404);
+			if (u.includes("/profile")) return jsonResponse({ historyId: "200" });
+			if (u.includes("/messages?labelIds=INBOX"))
+				return jsonResponse({ messages: [{ id: "z" }] });
+			if (u.includes("/messages/z"))
+				return jsonResponse(meta("c@d.com", ["INBOX"]));
+			throw new Error(`unexpected url ${u}`);
+		}) as unknown as typeof fetch;
+		const f = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		const msgs = await f.listNewInboxMessages?.();
+		expect(msgs?.map((m) => m.messageId)).toEqual(["z"]);
+		expect(watermark()).toBe("200");
+	});
+
+	it("transient history error (500): returns [] and does NOT advance the watermark", async () => {
+		writeFileSync(statePath(), JSON.stringify({ lastHistoryId: "100" }));
+		const fetchFn = (async (url: string | URL | Request) => {
+			const u = String(url);
+			if (u.includes("/token"))
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			if (u.includes("/history?")) return jsonResponse({}, false, 500);
+			throw new Error(`unexpected url ${u}`);
+		}) as unknown as typeof fetch;
+		const f = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		expect(await f.listNewInboxMessages?.()).toEqual([]);
+		expect(watermark()).toBe("100"); // unchanged
+	});
+
+	it("skips a message archived after it was added (no INBOX label now)", async () => {
+		writeFileSync(statePath(), JSON.stringify({ lastHistoryId: "100" }));
+		const fetchFn = (async (url: string | URL | Request) => {
+			const u = String(url);
+			if (u.includes("/token"))
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			if (u.includes("/history?"))
+				return jsonResponse({
+					historyId: "160",
+					history: [
+						{
+							messagesAdded: [{ message: { id: "gone", labelIds: ["INBOX"] } }],
+						},
+					],
+				});
+			if (u.includes("/messages/gone"))
+				return jsonResponse(meta("e@f.com", ["CATEGORY_PERSONAL"]));
+			throw new Error(`unexpected url ${u}`);
+		}) as unknown as typeof fetch;
+		const f = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		expect(await f.listNewInboxMessages?.()).toEqual([]);
 	});
 });
 

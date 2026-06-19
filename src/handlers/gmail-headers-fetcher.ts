@@ -19,7 +19,7 @@
  * before expiry.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Logger } from "../logger.js";
 import type { EmailHeaders, EmailHeadersFetcher } from "./gmail.js";
@@ -40,10 +40,18 @@ interface MessagesListResponse {
 	messages?: Array<{ id: string }>;
 }
 interface MessageGetResponse {
+	labelIds?: string[];
 	payload?: { headers?: GmailMessageHeader[] };
 }
 interface LabelsListResponse {
 	labels?: Array<{ id: string; name: string }>;
+}
+interface HistoryListResponse {
+	history?: Array<{
+		messagesAdded?: Array<{ message?: { id: string; labelIds?: string[] } }>;
+	}>;
+	historyId?: string;
+	nextPageToken?: string;
 }
 
 export interface GmailHeadersFetcherOptions {
@@ -246,6 +254,119 @@ export function createGmailHeadersFetcher(
 		return null;
 	}
 
+	// --- history watermark (persisted), so we only react to genuinely new mail ---
+	const historyStatePath = join(dataDir, "gmail_history_state.json");
+
+	function readWatermark(): string | undefined {
+		try {
+			const v = JSON.parse(readFileSync(historyStatePath, "utf-8"));
+			return typeof v?.lastHistoryId === "string" ? v.lastHistoryId : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	function writeWatermark(historyId: string): void {
+		try {
+			writeFileSync(
+				historyStatePath,
+				JSON.stringify({ lastHistoryId: historyId }),
+			);
+		} catch (err) {
+			logger.warn("Could not persist Gmail history watermark", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	async function currentHistoryId(token: string): Promise<string | undefined> {
+		const profile = await apiGet<{ historyId?: string }>("/profile", token);
+		return profile?.historyId;
+	}
+
+	async function listUnreadInboxIds(
+		token: string,
+		max = 50,
+	): Promise<string[]> {
+		const list = await apiGet<MessagesListResponse>(
+			`/messages?labelIds=INBOX&labelIds=UNREAD&maxResults=${max}`,
+			token,
+		);
+		return list?.messages?.map((m) => m.id) ?? [];
+	}
+
+	/** From + trusted Authentication-Results + current labelIds for one message. */
+	async function fetchMessageMeta(
+		token: string,
+		messageId: string,
+	): Promise<{
+		from: string;
+		authenticationResults: string;
+		labelIds: string[];
+	} | null> {
+		const message = await apiGet<MessageGetResponse>(
+			`/messages/${messageId}?format=metadata&metadataHeaders=From&metadataHeaders=Authentication-Results`,
+			token,
+		);
+		const headers = message?.payload?.headers;
+		if (!headers) return null;
+		return {
+			from: getHeader(headers, "From"),
+			authenticationResults: selectTrustedAuthResults(
+				headers,
+				trustedAuthservId,
+			),
+			labelIds: message?.labelIds ?? [],
+		};
+	}
+
+	/**
+	 * Message ids added to INBOX since startHistoryId (genuinely new mail —
+	 * NOT the agent's own SENT/label/archive churn). Returns "expired" on 404
+	 * (watermark older than Gmail's ~1wk retention) so the caller can fall back
+	 * to a full sweep, or null on a transient error (caller should not advance).
+	 */
+	async function inboxMessagesAddedSince(
+		token: string,
+		startHistoryId: string,
+	): Promise<{ ids: string[]; historyId?: string } | "expired" | null> {
+		const ids = new Set<string>();
+		let pageToken: string | undefined;
+		let latest: string | undefined;
+		do {
+			const url =
+				`${GMAIL_API}/history?startHistoryId=${startHistoryId}` +
+				`&historyTypes=messageAdded&labelId=INBOX&maxResults=100` +
+				(pageToken ? `&pageToken=${pageToken}` : "");
+			let res: Response;
+			try {
+				res = await fetchFn(url, {
+					headers: { Authorization: `Bearer ${token}` },
+				});
+			} catch (err) {
+				logger.warn("Gmail history.list threw", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+				return null;
+			}
+			if (res.status === 404) return "expired";
+			if (!res.ok) {
+				logger.warn("Gmail history.list failed", { status: res.status });
+				return null;
+			}
+			const json = (await res.json()) as HistoryListResponse;
+			latest = json.historyId ?? latest;
+			for (const h of json.history ?? []) {
+				for (const added of h.messagesAdded ?? []) {
+					const m = added.message;
+					if (m?.id && (m.labelIds ?? []).includes("INBOX")) ids.add(m.id);
+				}
+			}
+			pageToken = json.nextPageToken;
+		} while (pageToken);
+		return { ids: [...ids], historyId: latest };
+	}
+
 	return {
 		async fetchHeaders(
 			_emailAddress: string,
@@ -315,6 +436,53 @@ export function createGmailHeadersFetcher(
 						headers,
 						trustedAuthservId,
 					),
+					messageId,
+				});
+			}
+			return out;
+		},
+
+		async listNewInboxMessages(): Promise<EmailHeaders[]> {
+			const token = await getAccessToken();
+			if (!token) return [];
+
+			const watermark = readWatermark();
+			let ids: string[];
+			let newWatermark: string | undefined;
+
+			if (!watermark) {
+				// Cold start: baseline off the current unread inbox, then track history.
+				logger.info("No Gmail history watermark — baseline inbox sweep");
+				ids = await listUnreadInboxIds(token);
+				newWatermark = await currentHistoryId(token);
+			} else {
+				const hist = await inboxMessagesAddedSince(token, watermark);
+				if (hist === "expired") {
+					logger.warn("Gmail history watermark expired — full inbox sweep", {
+						watermark,
+					});
+					ids = await listUnreadInboxIds(token);
+					newWatermark = await currentHistoryId(token);
+				} else if (hist) {
+					ids = hist.ids;
+					newWatermark = hist.historyId;
+				} else {
+					// Transient error — don't advance the watermark, don't reprocess.
+					return [];
+				}
+			}
+
+			if (newWatermark) writeWatermark(newWatermark);
+
+			const out: EmailHeaders[] = [];
+			for (const messageId of ids) {
+				const meta = await fetchMessageMeta(token, messageId);
+				if (!meta) continue;
+				// Skip anything no longer in the inbox (archived since it was added).
+				if (!meta.labelIds.includes("INBOX")) continue;
+				out.push({
+					from: meta.from,
+					authenticationResults: meta.authenticationResults,
 					messageId,
 				});
 			}
