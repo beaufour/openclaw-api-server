@@ -96,6 +96,12 @@ export interface EmailHeadersFetcher {
 export interface EmailHeaders {
 	from: string;
 	authenticationResults: string;
+	/** Delegated senders (such as Drive) identify the initiator in Reply-To. */
+	replyTo?: string;
+	/** Raw DKIM signatures used to prove identity headers were signed. */
+	dkimSignatures?: string[];
+	/** True only when there is exactly one From and one Reply-To header. */
+	identityHeadersUnique?: boolean;
 	/** Gmail message id of the inspected message, for archiving on reject. */
 	messageId?: string;
 }
@@ -194,6 +200,11 @@ export async function handleGmailWebhook(
 				config.gmailRequireDkim,
 				config.gmailSenderAllowlist,
 				logger,
+				{
+					replyToHeader: m.replyTo,
+					dkimSignatures: m.dkimSignatures,
+					identityHeadersUnique: m.identityHeadersUnique,
+				},
 			);
 			if (ok) {
 				const labelled = await headersFetcher.labelMessage(
@@ -277,6 +288,11 @@ export async function handleGmailWebhook(
 			config.gmailRequireDkim,
 			config.gmailSenderAllowlist,
 			logger,
+			{
+				replyToHeader: headers.replyTo,
+				dkimSignatures: headers.dkimSignatures,
+				identityHeadersUnique: headers.identityHeadersUnique,
+			},
 		);
 
 		if (!senderOk) {

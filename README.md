@@ -1,16 +1,20 @@
-# OpenClaw Webhook Receiver
+# OpenClaw / Hermes Webhook Receiver
 
-[OpenClaw](https://openclaw.ai/) webhook receiver for external APIs. Replaces expensive LLM-monitored polling with near-real-time webhooks.
+Webhook receiver for external APIs that can wake either OpenClaw or Hermes.
+It replaces expensive LLM-monitored polling with near-real-time webhooks.
 
 ## Architecture
 
 ```
 Gmail (Pub/Sub Push) ──┐
-Asana (Webhooks)    ───┼──→ Cloudflare Edge ──→ cloudflared tunnel ──→ webhook server (:18790) ──→ OpenClaw Gateway (:18789)
-Strava (Webhooks)   ───┘                                                  scripts/server.ts          POST /hooks/<source>
+Asana (Webhooks)    ───┼──→ Cloudflare Edge ──→ tunnel ──→ receiver (:18790) ──┬─→ OpenClaw /hooks/<source>
+Strava (Webhooks)   ───┘                                                        └─→ Hermes /webhooks/<source>
 ```
 
-It runs as a small standalone HTTP server (`scripts/server.ts`): it terminates the public webhook traffic, validates each provider's auth, parses the payload, and forwards a wake event to the OpenClaw Gateway's `/hooks/<source>` endpoint. The Gateway and the tunnel are separate processes.
+It runs as a small standalone HTTP server (`scripts/server.ts`): it terminates
+the public webhook traffic, validates each provider's auth, parses the payload,
+and forwards a wake event to the configured agent gateway. The gateway and the
+tunnel are separate processes.
 
 > There is also an in-process Gateway plugin entry point (`src/index.ts`) using the same handlers, but the supported / actually-deployed setup is the standalone server described here.
 
@@ -25,7 +29,8 @@ It runs as a small standalone HTTP server (`scripts/server.ts`): it terminates t
 
 ## Running it
 
-Three processes need to be up: the OpenClaw Gateway (on `:18789`), this webhook server, and the cloudflared tunnel.
+Three processes need to be up: the selected agent gateway, this webhook server,
+and the public tunnel.
 
 ```bash
 npm install
@@ -51,14 +56,37 @@ Config is read from a `.env` file in the repo root (or real environment variable
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | Port the webhook server listens on | `18790` |
+| `AGENT_GATEWAY_BACKEND` | Outbound adapter: `openclaw` or `hermes` | `openclaw` |
 | `OPENCLAW_GATEWAY_URL` | Base URL of the OpenClaw Gateway to forward events to | `http://localhost:18789` |
 | `OPENCLAW_HOOK_TOKEN` | Bearer token sent to the Gateway's `/hooks/<source>` endpoints | (empty — forwarding will fail) |
+| `HERMES_WEBHOOK_URL` | Base URL of Hermes's webhook platform | `http://localhost:8644` |
+| `HERMES_WEBHOOK_SECRET` | Shared secret used for Hermes generic HMAC V2 signing | (empty — forwarding will fail) |
 | `ASANA_WEBHOOK_SECRET` | HMAC secret for Asana signature validation | (auto-persisted from handshake) |
 | `STRAVA_VERIFY_TOKEN` | Token for Strava subscription validation | (empty) |
 | `STRAVA_WEBHOOK_SECRET` | Secret path segment in the Strava callback URL | (empty) |
 | `GMAIL_PUBSUB_AUDIENCE` | Audience for Pub/Sub OIDC JWT validation | (empty, skips auth) |
+| `GMAIL_PUBSUB_TOPIC` | Full Pub/Sub topic name; enables daily in-process Gmail watch renewal | (empty, renewal disabled) |
 | `GMAIL_REQUIRE_DKIM` | Set to `true` to verify DKIM and check the sender allowlist | `false` |
 | `DATA_DIR` | Directory for persisted state (Asana secrets, allowlist) | `~/.openclaw-api-server` |
+
+## Hermes
+
+Set `AGENT_GATEWAY_BACKEND=hermes`. Each normalized provider payload is sent as
+JSON to `/webhooks/gmail`, `/webhooks/asana`, or `/webhooks/strava`. Requests use
+Hermes's replay-protected generic HMAC V2 protocol:
+
+- `X-Webhook-Timestamp`: current Unix timestamp
+- `X-Webhook-Signature-V2`: hex HMAC-SHA256 of `<timestamp>.<raw JSON body>`
+- `X-Request-ID`: unique delivery ID used by Hermes for idempotency
+
+Create matching routes with `hermes webhook subscribe`. The included
+`agent/hermes-gmail` skill processes only Gmail messages carrying the receiver's
+`approved` label and treats the webhook body as a wake signal, not authority.
+
+The repository includes a Dockerfile. In Compose, place this service and Hermes
+on the same private network, use `HERMES_WEBHOOK_URL=http://hermes:8644`, mount a
+persistent `DATA_DIR`, and publish port 18790 only to host loopback for the
+tunnel process.
 
 ## Cloudflare Tunnel
 
@@ -96,6 +124,8 @@ cloudflared tunnel run openclaw
 3. Create a push subscription pointing to `https://webhooks.yourdomain.com/webhook/gmail`
 4. Set `GMAIL_PUBSUB_AUDIENCE` to the same URL for JWT validation
 5. Call the Gmail API `watch()` method (must be renewed every 7 days)
+6. Set `GMAIL_PUBSUB_TOPIC` to the full `projects/.../topics/...` name so the
+   receiver renews the watch daily without a separate cron or host daemon
 
 There's a helper for steps 1–5: `scripts/setup-gmail.sh`.
 

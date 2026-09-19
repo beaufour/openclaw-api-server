@@ -4,6 +4,7 @@ import {
 	extractFromEmail,
 	isAllowlisted,
 	parseDkimResult,
+	passingSignatureCovers,
 } from "../src/handlers/dkim.js";
 import { createLogger } from "../src/logger.js";
 
@@ -159,6 +160,21 @@ describe("isAllowlisted", () => {
 			).toBe(true);
 		});
 
+		it("supports a From domain authenticated by its Microsoft 365 tenant", () => {
+			expect(
+				isAllowlisted(
+					"sayeed@artsandathletics.org",
+					"netorgft10142699.onmicrosoft.com",
+					[
+						{
+							fromEmail: "*@artsandathletics.org",
+							dkimDomain: "netorgft10142699.onmicrosoft.com",
+						},
+					],
+				),
+			).toBe(true);
+		});
+
 		it("still requires the DKIM domain to match", () => {
 			expect(
 				isAllowlisted("teacher@schools.nyc.gov", "evil.com", wildcard),
@@ -269,5 +285,90 @@ describe("checkSenderAuth", () => {
 			logger,
 		);
 		expect(result).toBe(true);
+	});
+});
+
+describe("delegated sender identity constraints", () => {
+	const authResults =
+		"mx.google.com; dkim=pass header.i=@google.com header.s=20251104 header.b=s9rnpbK4; spf=pass";
+	const signature =
+		"v=1; a=rsa-sha256; d=google.com; s=20251104; " +
+		"h=content-type:to:from:subject:date:message-id:reply-to; " +
+		"b=s9rnpbK4lCcVZT74GW7Oz63cRDjOfBiEN1Ux";
+	const allowlist = [
+		{
+			fromEmail: "drive-shares-dm-noreply@google.com",
+			dkimDomain: "google.com",
+			replyToEmail: "allan@beaufour.dk",
+			requiredSignedHeaders: ["from", "reply-to"],
+		},
+	];
+	const from =
+		'"Allan Beaufour (via Google Drive)" <drive-shares-dm-noreply@google.com>';
+
+	it("accepts a Google-signed Drive notification with Allan's signed Reply-To", () => {
+		expect(
+			checkSenderAuth(authResults, from, true, allowlist, logger, {
+				replyToHeader: "Allan Beaufour <allan@beaufour.dk>",
+				dkimSignatures: [signature],
+				identityHeadersUnique: true,
+			}),
+		).toBe(true);
+	});
+
+	it("rejects a Drive share from another Google user", () => {
+		expect(
+			checkSenderAuth(authResults, from, true, allowlist, logger, {
+				replyToHeader: "Attacker <attacker@gmail.com>",
+				dkimSignatures: [signature],
+				identityHeadersUnique: true,
+			}),
+		).toBe(false);
+	});
+
+	it("rejects when Reply-To is not covered by the passing signature", () => {
+		const unsignedReplyTo = signature.replace(":reply-to", "");
+		expect(
+			checkSenderAuth(authResults, from, true, allowlist, logger, {
+				replyToHeader: "Allan <allan@beaufour.dk>",
+				dkimSignatures: [unsignedReplyTo],
+				identityHeadersUnique: true,
+			}),
+		).toBe(false);
+	});
+
+	it("rejects a signature that does not match Gmail's passing selector", () => {
+		const otherSignature = signature.replace("s=20251104", "s=other");
+		expect(
+			checkSenderAuth(authResults, from, true, allowlist, logger, {
+				replyToHeader: "Allan <allan@beaufour.dk>",
+				dkimSignatures: [otherSignature],
+				identityHeadersUnique: true,
+			}),
+		).toBe(false);
+	});
+
+	it("rejects duplicate identity headers", () => {
+		expect(
+			checkSenderAuth(authResults, from, true, allowlist, logger, {
+				replyToHeader: "Allan <allan@beaufour.dk>",
+				dkimSignatures: [signature],
+				identityHeadersUnique: false,
+			}),
+		).toBe(false);
+	});
+
+	it("correlates the passing signature using Gmail's b= prefix", () => {
+		const dkim = parseDkimResult(authResults);
+		expect(
+			passingSignatureCovers(dkim, [signature], ["from", "reply-to"]),
+		).toBe(true);
+		expect(
+			passingSignatureCovers(
+				dkim,
+				[signature.replace("b=s9rnpbK4", "b=different")],
+				["from", "reply-to"],
+			),
+		).toBe(false);
 	});
 });

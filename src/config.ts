@@ -43,7 +43,16 @@ function loadAllowlist(dataDir: string): SenderAllowlistEntry[] {
 				"fromEmail" in entry &&
 				"dkimDomain" in entry &&
 				typeof (entry as SenderAllowlistEntry).fromEmail === "string" &&
-				typeof (entry as SenderAllowlistEntry).dkimDomain === "string",
+				typeof (entry as SenderAllowlistEntry).dkimDomain === "string" &&
+				(!("replyToEmail" in entry) ||
+					typeof (entry as SenderAllowlistEntry).replyToEmail === "string") &&
+				(!("requiredSignedHeaders" in entry) ||
+					(Array.isArray(
+						(entry as SenderAllowlistEntry).requiredSignedHeaders,
+					) &&
+						(entry as SenderAllowlistEntry).requiredSignedHeaders?.every(
+							(header) => typeof header === "string" && header.length > 0,
+						) === true)),
 		);
 	} catch {
 		return [];

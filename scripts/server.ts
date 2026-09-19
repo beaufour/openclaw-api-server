@@ -33,11 +33,17 @@ try {
 }
 
 import { loadConfig } from "../src/config.js";
-import { createDryRunClient, createGatewayClient } from "../src/gateway.js";
+import {
+	createAgentGatewayClient,
+	createDryRunClient,
+	type GatewayBackend,
+} from "../src/gateway.js";
+import { createFixedWindowCoalescer } from "../src/fixed-window-coalescer.js";
 import { handleAsanaWebhook } from "../src/handlers/asana.js";
 import type { GmailPubSubMessage } from "../src/handlers/gmail.js";
 import { handleGmailWebhook } from "../src/handlers/gmail.js";
 import { createGmailHeadersFetcher } from "../src/handlers/gmail-headers-fetcher.js";
+import { startGmailWatchRenewal } from "../src/gmail-watch-renewer.js";
 import type { StravaEvent } from "../src/handlers/strava.js";
 import {
 	handleStravaValidation,
@@ -51,13 +57,31 @@ const logger = createLogger("webhook-server");
 const PORT = Number(process.env.PORT ?? 18790);
 const DRY_RUN = process.argv.includes("--dry-run");
 const LOG_PAYLOAD = process.argv.includes("--log-payload");
+const GATEWAY_BACKEND = (process.env.AGENT_GATEWAY_BACKEND ??
+	"openclaw") as GatewayBackend;
+if (GATEWAY_BACKEND !== "openclaw" && GATEWAY_BACKEND !== "hermes") {
+	throw new Error(
+		`AGENT_GATEWAY_BACKEND must be "openclaw" or "hermes", got "${GATEWAY_BACKEND}"`,
+	);
+}
 const GATEWAY_URL =
-	process.env.OPENCLAW_GATEWAY_URL ?? "http://localhost:18789";
-const HOOK_TOKEN = process.env.OPENCLAW_HOOK_TOKEN ?? "";
+	GATEWAY_BACKEND === "hermes"
+		? (process.env.HERMES_WEBHOOK_URL ?? "http://localhost:8644")
+		: (process.env.OPENCLAW_GATEWAY_URL ?? "http://localhost:18789");
+const GATEWAY_SECRET =
+	GATEWAY_BACKEND === "hermes"
+		? (process.env.HERMES_WEBHOOK_SECRET ?? "")
+		: (process.env.OPENCLAW_HOOK_TOKEN ?? "");
 
 const gateway = DRY_RUN
 	? createDryRunClient(logger)
-	: createGatewayClient(GATEWAY_URL, HOOK_TOKEN, logger, LOG_PAYLOAD);
+	: createAgentGatewayClient({
+			backend: GATEWAY_BACKEND,
+			baseUrl: GATEWAY_URL,
+			secret: GATEWAY_SECRET,
+			logger,
+			logPayload: LOG_PAYLOAD,
+		});
 
 // Only build the headers fetcher when DKIM enforcement is on, so the rest of
 // the server has no dependency on Gmail OAuth credentials being present.
@@ -65,36 +89,24 @@ const gmailHeadersFetcher = config.gmailRequireDkim
 	? createGmailHeadersFetcher({ dataDir: config.dataDir, logger })
 	: undefined;
 
-// Gmail emits several Pub/Sub pushes per change (and the agent's own archive/
-// label/reply activity emits more — a feedback loop). Waking the agent on each
-// one spawns concurrent runs that double-process mail. Coalesce wakes: the
-// first fires immediately; any within the window collapse into ONE trailing
-// wake (nothing is stranded). The sweep still runs per push (idempotent), so a
-// single coalesced wake still sees every approved message.
+// Gmail emits several Pub/Sub pushes per change. Waking immediately and then
+// again on the trailing edge creates concurrent autonomous runs that can both
+// process the same approved queue. Hold the first wake for one fixed window and
+// collapse the whole burst into one trailing dispatch. The receiver still vets
+// every push, while the single agent run sweeps every approved message.
 const GMAIL_WAKE_DEBOUNCE_MS = Number(
 	process.env.GMAIL_WAKE_DEBOUNCE_MS ?? 15000,
 );
-let lastGmailWakeMs = 0;
-let gmailWakeTimer: ReturnType<typeof setTimeout> | null = null;
-let pendingGmailPayload: Record<string, unknown> | null = null;
-
-function fireGmailWake() {
-	lastGmailWakeMs = Date.now();
-	const p = pendingGmailPayload;
-	pendingGmailPayload = null;
-	if (p) void gateway.forward("gmail", p);
-}
-
-function scheduleGmailWake(payload: Record<string, unknown>) {
-	pendingGmailPayload = payload;
-	const since = Date.now() - lastGmailWakeMs;
-	if (since >= GMAIL_WAKE_DEBOUNCE_MS) {
-		fireGmailWake();
-		return;
-	}
-	if (gmailWakeTimer) return; // a trailing wake is already scheduled
-	gmailWakeTimer = setTimeout(fireGmailWake, GMAIL_WAKE_DEBOUNCE_MS - since);
-}
+const scheduleGmailWake = createFixedWindowCoalescer<
+	Record<string, unknown>
+>({
+	delayMs: GMAIL_WAKE_DEBOUNCE_MS,
+	dispatch: (payload) => gateway.forward("gmail", payload),
+	onError: (error) =>
+		logger.error("Failed to forward coalesced Gmail wake", {
+			error: error instanceof Error ? error.message : String(error),
+		}),
+});
 
 function readBody(req: http.IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
@@ -208,7 +220,10 @@ server.listen(PORT, () => {
 	if (DRY_RUN) {
 		logger.info("DRY RUN mode — events logged but not forwarded");
 	} else {
-		logger.info("Forwarding events to gateway", { url: GATEWAY_URL });
+		logger.info("Forwarding events to gateway", {
+			backend: GATEWAY_BACKEND,
+			url: GATEWAY_URL,
+		});
 	}
 	logger.info("Routes:", {
 		routes: [
@@ -227,6 +242,7 @@ server.listen(PORT, () => {
 		"GMAIL_REQUIRE_DKIM",
 		"GMAIL_DKIM_MODE",
 		"OPENCLAW_HOOK_TOKEN",
+		"HERMES_WEBHOOK_SECRET",
 		"DATA_DIR",
 	];
 	const set = envVars.filter((v) => process.env[v]);
@@ -251,5 +267,18 @@ server.listen(PORT, () => {
 				logger.info("Asana webhook secret loaded from persisted file");
 			}
 		});
+	}
+
+	const gmailPubsubTopic = process.env.GMAIL_PUBSUB_TOPIC ?? "";
+	if (gmailPubsubTopic) {
+		startGmailWatchRenewal({
+			dataDir: config.dataDir,
+			topic: gmailPubsubTopic,
+			logger,
+		});
+	} else {
+		logger.warn(
+			"GMAIL_PUBSUB_TOPIC not set — automatic Gmail watch renewal is disabled",
+		);
 	}
 });

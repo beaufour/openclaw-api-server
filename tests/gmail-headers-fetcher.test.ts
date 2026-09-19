@@ -99,6 +99,7 @@ describe("selectTrustedAuthResults", () => {
 describe("createGmailHeadersFetcher", () => {
 	it("refreshes a token and returns From + trusted Authentication-Results", async () => {
 		const ar = "mx.google.com; dkim=pass header.d=beaufour.dk; spf=pass";
+		const signature = "v=1; d=beaufour.dk; s=google; h=from:reply-to; b=abc123";
 		const fetcher = createGmailHeadersFetcher({
 			dataDir,
 			logger,
@@ -108,6 +109,8 @@ describe("createGmailHeadersFetcher", () => {
 						payload: {
 							headers: [
 								{ name: "From", value: "Allan <allan@beaufour.dk>" },
+								{ name: "Reply-To", value: "Allan <allan@beaufour.dk>" },
+								{ name: "DKIM-Signature", value: signature },
 								{
 									name: "Authentication-Results",
 									value: "spoof; dkim=pass header.d=evil.com",
@@ -122,6 +125,9 @@ describe("createGmailHeadersFetcher", () => {
 		expect(headers).toEqual({
 			from: "Allan <allan@beaufour.dk>",
 			authenticationResults: ar,
+			replyTo: "Allan <allan@beaufour.dk>",
+			dkimSignatures: [signature],
+			identityHeadersUnique: true,
 			messageId: "m1",
 		});
 	});

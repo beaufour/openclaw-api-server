@@ -15,11 +15,23 @@ import type { Logger } from "../logger.js";
 export interface DkimResult {
 	pass: boolean;
 	domain: string | undefined;
+	selector: string | undefined;
+	signaturePrefix: string | undefined;
 }
 
 export interface SenderAllowlistEntry {
 	fromEmail: string;
 	dkimDomain: string;
+	/** Optional exact Reply-To identity for delegated notification senders. */
+	replyToEmail?: string;
+	/** Headers that the passing DKIM signature must cryptographically cover. */
+	requiredSignedHeaders?: string[];
+}
+
+export interface SenderIdentityHeaders {
+	replyToHeader?: string;
+	dkimSignatures?: string[];
+	identityHeadersUnique?: boolean;
 }
 
 /**
@@ -34,7 +46,12 @@ export function parseDkimResult(authResults: string): DkimResult {
 	// Match "dkim=pass" or "dkim=fail" etc.
 	const dkimMatch = authResults.match(/\bdkim=(\w+)/);
 	if (!dkimMatch) {
-		return { pass: false, domain: undefined };
+		return {
+			pass: false,
+			domain: undefined,
+			selector: undefined,
+			signaturePrefix: undefined,
+		};
 	}
 
 	const pass = dkimMatch[1] === "pass";
@@ -53,7 +70,12 @@ export function parseDkimResult(authResults: string): DkimResult {
 		}
 	}
 
-	return { pass, domain };
+	return {
+		pass,
+		domain,
+		selector: authResults.match(/\bheader\.s=([^\s;]+)/)?.[1],
+		signaturePrefix: authResults.match(/\bheader\.b=([^\s;]+)/)?.[1],
+	};
 }
 
 /**
@@ -89,6 +111,41 @@ function fromMatches(pattern: string, fromEmail: string): boolean {
 	return p === from;
 }
 
+function dkimTag(signature: string, tag: string): string | undefined {
+	const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return signature
+		.match(new RegExp(`(?:^|;)\\s*${escaped}=([^;]*)`, "i"))?.[1]
+		.trim();
+}
+
+/** Confirm that the exact Gmail-passed signature covers all required headers. */
+export function passingSignatureCovers(
+	dkim: DkimResult,
+	signatures: string[],
+	requiredHeaders: string[],
+): boolean {
+	if (!dkim.pass || !dkim.domain || !dkim.selector || !dkim.signaturePrefix) {
+		return false;
+	}
+	const signaturePrefix = dkim.signaturePrefix;
+	const required = requiredHeaders.map((header) => header.toLowerCase());
+	return signatures.some((signature) => {
+		const domain = dkimTag(signature, "d")?.toLowerCase();
+		const selector = dkimTag(signature, "s");
+		const signatureValue = dkimTag(signature, "b")?.replace(/\s+/g, "");
+		const signedHeaders = (dkimTag(signature, "h") ?? "")
+			.split(":")
+			.map((header) => header.trim().toLowerCase())
+			.filter(Boolean);
+		return (
+			domain === dkim.domain?.toLowerCase() &&
+			selector === dkim.selector &&
+			signatureValue?.startsWith(signaturePrefix) === true &&
+			required.every((header) => signedHeaders.includes(header))
+		);
+	});
+}
+
 /**
  * Check if a sender is in the allowlist.
  *
@@ -97,20 +154,57 @@ function fromMatches(pattern: string, fromEmail: string): boolean {
  */
 export function isAllowlisted(
 	fromEmail: string,
-	dkimDomain: string | undefined,
+	dkimOrDomain: DkimResult | string | undefined,
 	allowlist: SenderAllowlistEntry[],
+	identityHeaders: SenderIdentityHeaders = {},
 ): boolean {
 	if (allowlist.length === 0) {
 		return true;
 	}
 
-	const normalizedDkim = dkimDomain?.toLowerCase();
+	const dkim: DkimResult =
+		typeof dkimOrDomain === "object"
+			? dkimOrDomain
+			: {
+					pass: Boolean(dkimOrDomain),
+					domain: dkimOrDomain,
+					selector: undefined,
+					signaturePrefix: undefined,
+				};
+	const normalizedDkim = dkim.domain?.toLowerCase();
 
-	return allowlist.some(
-		(entry) =>
-			fromMatches(entry.fromEmail, fromEmail) &&
-			entry.dkimDomain.toLowerCase() === normalizedDkim,
-	);
+	return allowlist.some((entry) => {
+		if (
+			!fromMatches(entry.fromEmail, fromEmail) ||
+			entry.dkimDomain.toLowerCase() !== normalizedDkim
+		) {
+			return false;
+		}
+		if (
+			(entry.replyToEmail || entry.requiredSignedHeaders) &&
+			identityHeaders.identityHeadersUnique !== true
+		) {
+			return false;
+		}
+		if (
+			entry.replyToEmail &&
+			extractFromEmail(identityHeaders.replyToHeader ?? "") !==
+				entry.replyToEmail.toLowerCase()
+		) {
+			return false;
+		}
+		if (
+			entry.requiredSignedHeaders &&
+			!passingSignatureCovers(
+				dkim,
+				identityHeaders.dkimSignatures ?? [],
+				entry.requiredSignedHeaders,
+			)
+		) {
+			return false;
+		}
+		return true;
+	});
 }
 
 /**
@@ -126,6 +220,7 @@ export function checkSenderAuth(
 	requireDkim: boolean,
 	allowlist: SenderAllowlistEntry[],
 	logger: Logger,
+	identityHeaders: SenderIdentityHeaders = {},
 ): boolean {
 	if (!requireDkim) {
 		return true;
@@ -148,7 +243,7 @@ export function checkSenderAuth(
 	const fromEmail = extractFromEmail(fromHeader);
 
 	if (allowlist.length > 0) {
-		const allowed = isAllowlisted(fromEmail, dkim.domain, allowlist);
+		const allowed = isAllowlisted(fromEmail, dkim, allowlist, identityHeaders);
 		if (!allowed) {
 			logger.info("Sender not in allowlist, dropping", {
 				from: fromEmail,
