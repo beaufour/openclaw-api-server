@@ -86,6 +86,20 @@ describe("selectTrustedAuthResults", () => {
 		expect(selectTrustedAuthResults(headers, "mx.google.com")).toBe("");
 	});
 
+	it("requires the authserv-id as the first token, not attacker-controlled text", () => {
+		expect(
+			selectTrustedAuthResults(
+				[
+					{
+						name: "Authentication-Results",
+						value: "evil.example; note=mx.google.com; dkim=pass",
+					},
+				],
+				"mx.google.com",
+			),
+		).toBe("");
+	});
+
 	it("returns empty when there is no Authentication-Results header", () => {
 		expect(
 			selectTrustedAuthResults(
@@ -128,6 +142,7 @@ describe("createGmailHeadersFetcher", () => {
 			replyTo: "Allan <allan@beaufour.dk>",
 			dkimSignatures: [signature],
 			identityHeadersUnique: true,
+			fromHeaderUnique: true,
 			messageId: "m1",
 		});
 	});
@@ -419,5 +434,109 @@ describe("listUnreadInbox + labelMessage", () => {
 		expect(bodies).toEqual([
 			{ addLabelIds: ["Label_new"], removeLabelIds: ["INBOX", "UNREAD"] },
 		]);
+	});
+
+	it("removes the opposite decision label when relabeling", async () => {
+		const bodies: unknown[] = [];
+		const fetchFn = (async (
+			url: string | URL | Request,
+			init?: RequestInit,
+		) => {
+			const u = String(url);
+			if (u.includes("/token")) {
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			}
+			if (u.endsWith("/labels")) {
+				return jsonResponse({
+					labels: [
+						{ id: "Label_1", name: "approved" },
+						{ id: "Label_3", name: "rejected" },
+					],
+				});
+			}
+			if (u.includes("/modify")) {
+				bodies.push(JSON.parse(String(init?.body)));
+				return jsonResponse({ id: "m1" });
+			}
+			throw new Error(`unexpected url ${u}`);
+		}) as unknown as typeof fetch;
+		const fetcher = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		expect(
+			await fetcher.labelMessage?.("m1", "approved", false, ["rejected"]),
+		).toBe(true);
+		expect(bodies).toEqual([
+			{ addLabelIds: ["Label_1"], removeLabelIds: ["Label_3"] },
+		]);
+	});
+});
+
+describe("verifySentReplyChain", () => {
+	it("requires an exact same-thread Sent parent and original To/Cc participant", async () => {
+		const calls: string[] = [];
+		const fetchFn = (async (url: string | URL | Request) => {
+			const u = String(url);
+			calls.push(u);
+			if (u.includes("/token")) {
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			}
+			if (u.includes("/messages?q=")) {
+				return jsonResponse({ messages: [{ id: "sent-1" }] });
+			}
+			if (u.includes("/messages/sent-1")) {
+				return jsonResponse({
+					threadId: "thread-1",
+					payload: {
+						headers: [
+							{ name: "Message-ID", value: "<ours@gmail.com>" },
+							{
+								name: "To",
+								value: "Allan Beaufour <allanb@spotify.com>",
+							},
+							{ name: "Cc", value: "allan@beaufour.dk" },
+						],
+					},
+				});
+			}
+			throw new Error(`unexpected url ${u}`);
+		}) as unknown as typeof fetch;
+		const fetcher = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		await expect(
+			fetcher.verifySentReplyChain?.(
+				{
+					from: "Allan <allanb@spotify.com>",
+					authenticationResults: "",
+					threadId: "thread-1",
+					inReplyTo: "<ours@gmail.com>",
+				},
+				"allanb@spotify.com",
+			),
+		).resolves.toBe(true);
+		expect(
+			decodeURIComponent(calls.find((u) => u.includes("?q=")) ?? ""),
+		).toContain("in:sent rfc822msgid:<ours@gmail.com>");
+	});
+
+	it("does not treat a forward-like message without reply headers as a reply", async () => {
+		let searched = false;
+		const fetchFn = (async (url: string | URL | Request) => {
+			const u = String(url);
+			if (u.includes("/token")) {
+				return jsonResponse({ access_token: "at", expires_in: 3600 });
+			}
+			searched = true;
+			return jsonResponse({});
+		}) as unknown as typeof fetch;
+		const fetcher = createGmailHeadersFetcher({ dataDir, logger, fetchFn });
+		await expect(
+			fetcher.verifySentReplyChain?.(
+				{
+					from: "Allan <allanb@spotify.com>",
+					authenticationResults: "",
+					threadId: "thread-1",
+				},
+				"allanb@spotify.com",
+			),
+		).resolves.toBe(false);
+		expect(searched).toBe(false);
 	});
 });

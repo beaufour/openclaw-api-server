@@ -40,6 +40,10 @@ class AuditDecisionTests(unittest.TestCase):
         document = dict(VALID_DOCUMENT, category="google_drive", outcome="notified")
         self.assertEqual(validate_document(document), document)
 
+    def test_reply_category(self) -> None:
+        document = dict(VALID_DOCUMENT, category="reply", outcome="needs_decision")
+        self.assertEqual(validate_document(document), document)
+
     def test_missing_field_is_rejected(self) -> None:
         document = dict(VALID_DOCUMENT)
         del document["items"]

@@ -34,6 +34,11 @@ export interface SenderIdentityHeaders {
 	identityHeadersUnique?: boolean;
 }
 
+export interface AuthenticatedSenderIdentity {
+	email: string;
+	domain: string;
+}
+
 /**
  * Parse DKIM result from an Authentication-Results header value.
  *
@@ -94,6 +99,24 @@ export function extractFromEmail(fromHeader: string): string {
 	return fromHeader.trim().toLowerCase();
 }
 
+/** Extract one unambiguous mailbox from a From header, or fail closed. */
+export function extractSingleFromEmail(fromHeader: string): string | undefined {
+	if (/\r|\n/.test(fromHeader)) return undefined;
+	const angleAddresses = [...fromHeader.matchAll(/<([^<>]+)>/g)].map((match) =>
+		match[1].trim().toLowerCase(),
+	);
+	if (angleAddresses.length === 1) {
+		const outsideAngles = fromHeader.replace(/<[^<>]+>/g, "");
+		if (outsideAngles.includes("@")) return undefined;
+		return /^[^\s@,;<>]+@[^\s@,;<>]+$/.test(angleAddresses[0])
+			? angleAddresses[0]
+			: undefined;
+	}
+	if (angleAddresses.length > 0) return undefined;
+	const bare = fromHeader.trim().toLowerCase();
+	return /^[^\s@,;<>]+@[^\s@,;<>]+$/.test(bare) ? bare : undefined;
+}
+
 /**
  * Match a From address against an allowlist entry's fromEmail pattern.
  *
@@ -144,6 +167,35 @@ export function passingSignatureCovers(
 			required.every((header) => signedHeaders.includes(header))
 		);
 	});
+}
+
+/**
+ * Authenticate From for the sent-thread admission rule. A bare `dkim=pass`
+ * is insufficient: Gmail must report aligned DKIM and DMARC passes, and the
+ * exact passing DKIM signature must cryptographically cover From.
+ */
+export function authenticatedSenderIdentity(
+	authResultsHeader: string,
+	fromHeader: string,
+	dkimSignatures: string[],
+): AuthenticatedSenderIdentity | undefined {
+	const email = extractSingleFromEmail(fromHeader);
+	if (!email) return undefined;
+	const fromDomain = email.slice(email.lastIndexOf("@") + 1).toLowerCase();
+	const dkim = parseDkimResult(authResultsHeader);
+	if (
+		!dkim.pass ||
+		dkim.domain?.toLowerCase() !== fromDomain ||
+		!passingSignatureCovers(dkim, dkimSignatures, ["from"])
+	) {
+		return undefined;
+	}
+
+	const dmarc = authResultsHeader.match(
+		/\bdmarc=pass\b[^;]*\bheader\.from=([^\s;]+)/i,
+	);
+	if (dmarc?.[1]?.toLowerCase() !== fromDomain) return undefined;
+	return { email, domain: fromDomain };
 }
 
 /**

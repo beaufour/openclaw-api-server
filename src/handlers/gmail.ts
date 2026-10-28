@@ -22,7 +22,7 @@
 
 import type { Config } from "../config.js";
 import type { Logger } from "../logger.js";
-import { checkSenderAuth } from "./dkim.js";
+import { authenticatedSenderIdentity, checkSenderAuth } from "./dkim.js";
 
 /** Gmail labels the gate applies. The agent processes only LABEL_APPROVED. */
 export const LABEL_APPROVED = "approved";
@@ -52,7 +52,10 @@ export interface GmailHandlerResult {
 }
 
 export interface JwtVerifier {
-	verify(token: string, audience: string): Promise<{ email?: string }>;
+	verify(
+		token: string,
+		audience: string,
+	): Promise<{ email?: string; emailVerified?: boolean }>;
 }
 
 /**
@@ -65,6 +68,8 @@ export interface EmailHeadersFetcher {
 		emailAddress: string,
 		historyId: string,
 	): Promise<EmailHeaders | null>;
+	/** Fetch one exact Gmail message by API id, including admission metadata. */
+	fetchMessageById?(messageId: string): Promise<EmailHeaders | null>;
 	/**
 	 * Archive a message (remove it from the inbox) so a later agent run won't
 	 * sweep it up via "in:inbox is:unread". Optional: requires gmail.modify
@@ -90,6 +95,12 @@ export interface EmailHeadersFetcher {
 		messageId: string,
 		labelName: string,
 		alsoArchive?: boolean,
+		removeLabelNames?: string[],
+	): Promise<boolean>;
+	/** Verify that a reply references an exact Sent message and sender was To/Cc. */
+	verifySentReplyChain?(
+		message: EmailHeaders,
+		senderEmail: string,
 	): Promise<boolean>;
 }
 
@@ -102,8 +113,108 @@ export interface EmailHeaders {
 	dkimSignatures?: string[];
 	/** True only when there is exactly one From and one Reply-To header. */
 	identityHeadersUnique?: boolean;
+	/** True only when Gmail returned exactly one From header. */
+	fromHeaderUnique?: boolean;
+	/** Gmail-trusted metadata used to verify a real reply, never a forward. */
+	threadId?: string;
+	inReplyTo?: string;
+	references?: string;
 	/** Gmail message id of the inspected message, for archiving on reject. */
 	messageId?: string;
+}
+
+async function isAuthenticatedSentThreadReply(
+	message: EmailHeaders,
+	fetcher: EmailHeadersFetcher,
+	logger: Logger,
+): Promise<boolean> {
+	if (
+		message.fromHeaderUnique !== true ||
+		!message.messageId ||
+		!fetcher.verifySentReplyChain
+	) {
+		return false;
+	}
+	const identity = authenticatedSenderIdentity(
+		message.authenticationResults,
+		message.from,
+		message.dkimSignatures ?? [],
+	);
+	if (!identity) {
+		logger.info(
+			"Reply-chain admission denied: sender identity not authenticated",
+			{
+				from: message.from,
+				message_id: message.messageId,
+			},
+		);
+		return false;
+	}
+	const verified = await fetcher.verifySentReplyChain(message, identity.email);
+	if (verified) {
+		logger.info("Reply-chain admission verified", {
+			from: identity.email,
+			message_id: message.messageId,
+		});
+	}
+	return verified;
+}
+
+export type GmailAdmissionDecision = "approved" | "rejected" | "label-error";
+
+/** Evaluate and atomically relabel one exact message under the gate policy. */
+export async function vetAndLabelGmailMessage(
+	message: EmailHeaders,
+	config: Config,
+	fetcher: EmailHeadersFetcher,
+	logger: Logger,
+): Promise<GmailAdmissionDecision> {
+	if (!message.messageId || !fetcher.labelMessage) return "label-error";
+	let ok = checkSenderAuth(
+		message.authenticationResults,
+		message.from,
+		config.gmailRequireDkim,
+		config.gmailSenderAllowlist,
+		logger,
+		{
+			replyToHeader: message.replyTo,
+			dkimSignatures: message.dkimSignatures,
+			identityHeadersUnique: message.identityHeadersUnique,
+		},
+	);
+	if (!ok) {
+		ok = await isAuthenticatedSentThreadReply(message, fetcher, logger);
+	}
+
+	const label = ok ? LABEL_APPROVED : LABEL_REJECTED;
+	const remove = ok ? [LABEL_REJECTED] : [LABEL_APPROVED];
+	const archive = !ok && config.gmailDkimMode === "enforce";
+	const applied = await fetcher.labelMessage(
+		message.messageId,
+		label,
+		archive,
+		remove,
+	);
+	if (!applied) return "label-error";
+	logger.info(ok ? "Approved message for processing" : "Rejected message", {
+		from: message.from,
+		message_id: message.messageId,
+		...(ok ? {} : { archived: archive }),
+	});
+	return ok ? "approved" : "rejected";
+}
+
+/** Local/operator-only exact-message replay. No public HTTP route calls this. */
+export async function reprocessGmailMessage(
+	messageId: string,
+	config: Config,
+	fetcher: EmailHeadersFetcher,
+	logger: Logger,
+): Promise<GmailAdmissionDecision> {
+	if (!fetcher.fetchMessageById) return "label-error";
+	const message = await fetcher.fetchMessageById(messageId);
+	if (!message) return "label-error";
+	return vetAndLabelGmailMessage(message, config, fetcher, logger);
 }
 
 export function verifyAuthHeader(
@@ -126,6 +237,21 @@ export function verifyAuthHeader(
 	return verifier
 		.verify(token, config.gmailPubsubAudience)
 		.then((claim) => {
+			if (
+				config.gmailPubsubServiceAccount &&
+				(claim.emailVerified !== true ||
+					claim.email?.toLowerCase() !== config.gmailPubsubServiceAccount)
+			) {
+				logger.warn("Pub/Sub token service account mismatch", {
+					email: claim.email,
+				});
+				return false;
+			}
+			if (!config.gmailPubsubServiceAccount) {
+				logger.warn(
+					"GMAIL_PUBSUB_SERVICE_ACCOUNT not set; token issuer identity is not pinned",
+				);
+			}
 			logger.debug("Pub/Sub token verified", { email: claim.email });
 			return true;
 		})
@@ -194,45 +320,17 @@ export async function handleGmailWebhook(
 		let rejected = 0;
 		for (const m of messages) {
 			if (!m.messageId) continue;
-			const ok = checkSenderAuth(
-				m.authenticationResults,
-				m.from,
-				config.gmailRequireDkim,
-				config.gmailSenderAllowlist,
+			const decision = await vetAndLabelGmailMessage(
+				m,
+				config,
+				headersFetcher,
 				logger,
-				{
-					replyToHeader: m.replyTo,
-					dkimSignatures: m.dkimSignatures,
-					identityHeadersUnique: m.identityHeadersUnique,
-				},
 			);
-			if (ok) {
-				const labelled = await headersFetcher.labelMessage(
-					m.messageId,
-					LABEL_APPROVED,
-					false,
-				);
-				if (labelled) {
-					approved++;
-					logger.info("Approved message for processing", {
-						from: m.from,
-						message_id: m.messageId,
-					});
-				} else {
-					logger.warn("Vetted-OK but could not apply approved label", {
-						message_id: m.messageId,
-					});
-				}
-			} else {
-				// enforce archives rejected out of the inbox; monitor leaves it
-				// in the inbox but labeled, for visibility.
-				const archive = config.gmailDkimMode === "enforce";
-				await headersFetcher.labelMessage(m.messageId, LABEL_REJECTED, archive);
-				rejected++;
-				logger.info("Rejected message", {
-					from: m.from,
+			if (decision === "approved") approved++;
+			if (decision === "rejected") rejected++;
+			if (decision === "label-error") {
+				logger.warn("Could not apply Gmail admission label", {
 					message_id: m.messageId,
-					archived: archive,
 				});
 			}
 		}
@@ -282,7 +380,7 @@ export async function handleGmailWebhook(
 			};
 		}
 
-		const senderOk = checkSenderAuth(
+		let senderOk = checkSenderAuth(
 			headers.authenticationResults,
 			headers.from,
 			config.gmailRequireDkim,
@@ -294,6 +392,13 @@ export async function handleGmailWebhook(
 				identityHeadersUnique: headers.identityHeadersUnique,
 			},
 		);
+		if (!senderOk) {
+			senderOk = await isAuthenticatedSentThreadReply(
+				headers,
+				headersFetcher,
+				logger,
+			);
+		}
 
 		if (!senderOk) {
 			if (config.gmailDkimMode === "enforce") {

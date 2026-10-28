@@ -12,6 +12,7 @@ export interface Config {
 
 	// Gmail Pub/Sub
 	gmailPubsubAudience: string;
+	gmailPubsubServiceAccount: string;
 
 	// Gmail DKIM verification
 	gmailRequireDkim: boolean;
@@ -62,11 +63,19 @@ function loadAllowlist(dataDir: string): SenderAllowlistEntry[] {
 export function loadConfig(): Config {
 	const dataDir =
 		process.env.DATA_DIR ?? `${process.env.HOME}/.openclaw-api-server`;
+	const gmailPubsubProject = process.env.GMAIL_PUBSUB_TOPIC?.match(
+		/^projects\/([a-z0-9][a-z0-9-]{4,28}[a-z0-9])\/topics\//,
+	)?.[1];
 	return {
 		asanaWebhookSecret: process.env.ASANA_WEBHOOK_SECRET ?? "",
 		stravaVerifyToken: process.env.STRAVA_VERIFY_TOKEN ?? "",
 		stravaWebhookSecret: process.env.STRAVA_WEBHOOK_SECRET ?? "",
 		gmailPubsubAudience: process.env.GMAIL_PUBSUB_AUDIENCE ?? "",
+		gmailPubsubServiceAccount:
+			process.env.GMAIL_PUBSUB_SERVICE_ACCOUNT?.toLowerCase() ??
+			(gmailPubsubProject
+				? `pubsub-gmail-push@${gmailPubsubProject}.iam.gserviceaccount.com`
+				: ""),
 		gmailRequireDkim: process.env.GMAIL_REQUIRE_DKIM === "true",
 		gmailDkimMode:
 			process.env.GMAIL_DKIM_MODE === "enforce" ? "enforce" : "monitor",

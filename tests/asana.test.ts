@@ -20,6 +20,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 		stravaVerifyToken: "",
 		stravaWebhookSecret: "",
 		gmailPubsubAudience: "",
+		gmailPubsubServiceAccount: "",
 		gmailRequireDkim: false,
 		gmailSenderAllowlist: [],
 		dataDir: "/tmp/test-asana-data",

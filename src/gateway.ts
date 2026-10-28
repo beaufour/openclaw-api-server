@@ -10,7 +10,11 @@ import http from "node:http";
 import type { Logger } from "./logger.js";
 
 export interface GatewayClient {
-	forward(source: string, payload: Record<string, unknown>): Promise<boolean>;
+	forward(
+		source: string,
+		payload: Record<string, unknown>,
+		deliveryId?: string,
+	): Promise<boolean>;
 }
 
 export type GatewayBackend = "openclaw" | "hermes";
@@ -21,6 +25,10 @@ export interface GatewayClientOptions {
 	secret: string;
 	logger: Logger;
 	logPayload?: boolean;
+	/** Trusted configuration, never derived from the notification payload. */
+	routeProfiles?: Record<string, string>;
+	/** Require a confirmed deliver-only response, not merely HTTP acceptance. */
+	requireDelivered?: boolean;
 }
 
 function request(
@@ -29,6 +37,7 @@ function request(
 	headers: Record<string, string>,
 	logger: Logger,
 	path: string,
+	requireDelivered = false,
 ): Promise<boolean> {
 	return new Promise((resolve) => {
 		const req = http.request(
@@ -43,6 +52,26 @@ function request(
 				timeout: 10_000,
 			},
 			(res) => {
+				if (requireDelivered) {
+					let body = "";
+					res.on("data", (chunk: Buffer) => {
+						if (body.length < 4096) body += chunk.toString();
+					});
+					res.on("error", () => resolve(false));
+					res.on("end", () => {
+						try {
+							const result = JSON.parse(body);
+							resolve(
+								res.statusCode === 200 &&
+									result.status === "delivered" &&
+									result.target === "slack",
+							);
+						} catch {
+							resolve(false);
+						}
+					});
+					return;
+				}
 				res.resume();
 				if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
 					logger.info(`Forwarded event to gateway (${path})`, {
@@ -65,6 +94,9 @@ function request(
 			resolve(false);
 		});
 
+		req.on("timeout", () =>
+			req.destroy(new Error("Gateway request timed out")),
+		);
 		req.end(body);
 	});
 }
@@ -79,7 +111,18 @@ function request(
 export function createAgentGatewayClient(
 	options: GatewayClientOptions,
 ): GatewayClient {
-	const { backend, baseUrl, secret, logger, logPayload = false } = options;
+	const {
+		backend,
+		baseUrl,
+		secret,
+		logger,
+		logPayload = false,
+		routeProfiles = {},
+	} = options;
+	for (const profile of Object.values(routeProfiles)) {
+		if (!/^[a-z0-9][a-z0-9_-]*$/.test(profile))
+			throw new Error("Invalid configured route profile");
+	}
 	if (!secret) {
 		logger.error(
 			backend === "hermes"
@@ -89,9 +132,19 @@ export function createAgentGatewayClient(
 	}
 
 	return {
-		async forward(source, payload) {
+		async forward(source, payload, deliveryId) {
+			if (
+				deliveryId !== undefined &&
+				!/^[a-zA-Z0-9_-]{1,120}$/.test(deliveryId)
+			)
+				throw new Error("Invalid delivery ID");
+			if (!/^[a-z0-9][a-z0-9_-]*$/.test(source))
+				throw new Error("Invalid route name");
 			if (backend === "hermes") {
-				const path = `/webhooks/${source}`;
+				const profile = Object.hasOwn(routeProfiles, source)
+					? routeProfiles[source]
+					: undefined;
+				const path = `${profile ? `/p/${profile}` : ""}/webhooks/${source}`;
 				const url = new URL(path, baseUrl);
 				const body = JSON.stringify({ event_type: source, ...payload });
 				const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -106,10 +159,11 @@ export function createAgentGatewayClient(
 					{
 						"X-Webhook-Timestamp": timestamp,
 						"X-Webhook-Signature-V2": signature,
-						"X-Request-ID": `${source}-${randomUUID()}`,
+						"X-Request-ID": deliveryId ?? `${source}-${randomUUID()}`,
 					},
 					logger,
 					path,
+					options.requireDelivered,
 				);
 			}
 

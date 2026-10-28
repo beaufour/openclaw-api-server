@@ -1,7 +1,10 @@
 node_modules/
 dist/
+dist-runtime/
 .env
 *.tsbuildinfo
+__pycache__/
+*.pyc
 
 # Local Claude Code settings
 .claude/

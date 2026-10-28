@@ -28,7 +28,15 @@ DISPOSITIONS = {
     "skipped_policy",
     "needs_decision",
 }
-CATEGORIES = {"allan", "google_drive", "school", "asana", "grubhub", "unknown"}
+CATEGORIES = {
+    "allan",
+    "google_drive",
+    "school",
+    "asana",
+    "grubhub",
+    "reply",
+    "unknown",
+}
 OUTCOMES = {"replied", "notified", "recorded", "silent", "needs_decision"}
 
 

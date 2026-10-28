@@ -40,6 +40,8 @@ interface MessagesListResponse {
 	messages?: Array<{ id: string }>;
 }
 interface MessageGetResponse {
+	id?: string;
+	threadId?: string;
 	labelIds?: string[];
 	payload?: { headers?: GmailMessageHeader[] };
 }
@@ -77,12 +79,13 @@ export function selectTrustedAuthResults(
 	headers: GmailMessageHeader[],
 	trustedAuthservId: string,
 ): string {
-	const needle = trustedAuthservId.toLowerCase();
+	const needle = trustedAuthservId.trim().toLowerCase();
 	const candidates = headers.filter(
 		(h) => h.name.toLowerCase() === "authentication-results",
 	);
 	for (const h of candidates) {
-		if (h.value.toLowerCase().includes(needle)) {
+		const authservId = h.value.split(";", 1)[0]?.trim().toLowerCase();
+		if (authservId === needle) {
 			return h.value;
 		}
 	}
@@ -106,17 +109,41 @@ function identityHeaders(headers: GmailMessageHeader[]): {
 	replyTo?: string;
 	dkimSignatures?: string[];
 	identityHeadersUnique: boolean;
+	fromHeaderUnique: boolean;
+	inReplyTo?: string;
+	references?: string;
 } {
 	const fromHeaders = getHeaders(headers, "From");
 	const replyToHeaders = getHeaders(headers, "Reply-To");
 	const replyTo = replyToHeaders[0] ?? "";
 	const dkimSignatures = getHeaders(headers, "DKIM-Signature");
+	const inReplyTo = getHeader(headers, "In-Reply-To");
+	const references = getHeader(headers, "References");
 	return {
 		...(replyTo ? { replyTo } : {}),
 		...(dkimSignatures.length > 0 ? { dkimSignatures } : {}),
 		identityHeadersUnique:
 			fromHeaders.length === 1 && replyToHeaders.length === 1,
+		fromHeaderUnique: fromHeaders.length === 1,
+		...(inReplyTo ? { inReplyTo } : {}),
+		...(references ? { references } : {}),
 	};
+}
+
+function referencedMessageIds(message: EmailHeaders): string[] {
+	const candidates = `${message.inReplyTo ?? ""} ${message.references ?? ""}`;
+	const matches = candidates.match(/<[^<>\s]{1,996}>/g) ?? [];
+	return [...new Set(matches.reverse())].slice(0, 20);
+}
+
+function recipientAddresses(value: string): Set<string> {
+	const addresses = new Set<string>();
+	for (const match of value.matchAll(
+		/(?:^|[,;])\s*(?:[^<>]*<)?([^\s,;<>]+@[^\s,;<>]+)>?/g,
+	)) {
+		addresses.add(match[1].toLowerCase());
+	}
+	return addresses;
 }
 
 export function createGmailHeadersFetcher(
@@ -329,10 +356,14 @@ export function createGmailHeadersFetcher(
 		replyTo?: string;
 		dkimSignatures?: string[];
 		identityHeadersUnique?: boolean;
+		fromHeaderUnique?: boolean;
+		threadId?: string;
+		inReplyTo?: string;
+		references?: string;
 		labelIds: string[];
 	} | null> {
 		const message = await apiGet<MessageGetResponse>(
-			`/messages/${messageId}?format=metadata&metadataHeaders=From&metadataHeaders=Reply-To&metadataHeaders=Authentication-Results&metadataHeaders=DKIM-Signature`,
+			`/messages/${messageId}?format=metadata&metadataHeaders=From&metadataHeaders=Reply-To&metadataHeaders=Authentication-Results&metadataHeaders=DKIM-Signature&metadataHeaders=In-Reply-To&metadataHeaders=References`,
 			token,
 		);
 		const headers = message?.payload?.headers;
@@ -344,6 +375,7 @@ export function createGmailHeadersFetcher(
 				trustedAuthservId,
 			),
 			...identityHeaders(headers),
+			...(message.threadId ? { threadId: message.threadId } : {}),
 			labelIds: message?.labelIds ?? [],
 		};
 	}
@@ -396,6 +428,15 @@ export function createGmailHeadersFetcher(
 	}
 
 	return {
+		async fetchMessageById(messageId: string): Promise<EmailHeaders | null> {
+			const token = await getAccessToken();
+			if (!token) return null;
+			const meta = await fetchMessageMeta(token, messageId);
+			if (!meta) return null;
+			const { labelIds: _labelIds, ...headers } = meta;
+			return { ...headers, messageId };
+		},
+
 		async fetchHeaders(
 			_emailAddress: string,
 			_historyId: string,
@@ -418,7 +459,7 @@ export function createGmailHeadersFetcher(
 			}
 
 			const message = await apiGet<MessageGetResponse>(
-				`/messages/${messageId}?format=metadata&metadataHeaders=From&metadataHeaders=Reply-To&metadataHeaders=Authentication-Results&metadataHeaders=DKIM-Signature`,
+				`/messages/${messageId}?format=metadata&metadataHeaders=From&metadataHeaders=Reply-To&metadataHeaders=Authentication-Results&metadataHeaders=DKIM-Signature&metadataHeaders=In-Reply-To&metadataHeaders=References`,
 				token,
 			);
 			const headers = message?.payload?.headers;
@@ -443,6 +484,7 @@ export function createGmailHeadersFetcher(
 				from,
 				authenticationResults,
 				...identityHeaders(headers),
+				...(message.threadId ? { threadId: message.threadId } : {}),
 				messageId,
 			};
 		},
@@ -458,7 +500,7 @@ export function createGmailHeadersFetcher(
 			const out: EmailHeaders[] = [];
 			for (const messageId of ids) {
 				const message = await apiGet<MessageGetResponse>(
-					`/messages/${messageId}?format=metadata&metadataHeaders=From&metadataHeaders=Reply-To&metadataHeaders=Authentication-Results&metadataHeaders=DKIM-Signature`,
+					`/messages/${messageId}?format=metadata&metadataHeaders=From&metadataHeaders=Reply-To&metadataHeaders=Authentication-Results&metadataHeaders=DKIM-Signature&metadataHeaders=In-Reply-To&metadataHeaders=References`,
 					token,
 				);
 				const headers = message?.payload?.headers;
@@ -470,6 +512,7 @@ export function createGmailHeadersFetcher(
 						trustedAuthservId,
 					),
 					...identityHeaders(headers),
+					...(message.threadId ? { threadId: message.threadId } : {}),
 					messageId,
 				});
 			}
@@ -522,6 +565,10 @@ export function createGmailHeadersFetcher(
 						? { dkimSignatures: meta.dkimSignatures }
 						: {}),
 					identityHeadersUnique: meta.identityHeadersUnique,
+					fromHeaderUnique: meta.fromHeaderUnique,
+					...(meta.threadId ? { threadId: meta.threadId } : {}),
+					...(meta.inReplyTo ? { inReplyTo: meta.inReplyTo } : {}),
+					...(meta.references ? { references: meta.references } : {}),
 					messageId,
 				});
 			}
@@ -532,17 +579,59 @@ export function createGmailHeadersFetcher(
 			messageId: string,
 			labelName: string,
 			alsoArchive = false,
+			removeLabelNames: string[] = [],
 		): Promise<boolean> {
 			const token = await getAccessToken();
 			if (!token) return false;
 			const labelId = await ensureLabel(token, labelName);
 			if (!labelId) return false;
-			const removeLabelIds = alsoArchive ? ["INBOX", "UNREAD"] : [];
+			const resolvedRemoveIds = (
+				await Promise.all(
+					removeLabelNames.map((name) => ensureLabel(token, name)),
+				)
+			).filter((id): id is string => Boolean(id));
+			const removeLabelIds = [
+				...new Set([
+					...resolvedRemoveIds,
+					...(alsoArchive ? ["INBOX", "UNREAD"] : []),
+				]),
+			];
 			const res = await apiPost(`/messages/${messageId}/modify`, token, {
 				addLabelIds: [labelId],
 				removeLabelIds,
 			});
 			return res !== null;
+		},
+
+		async verifySentReplyChain(
+			message: EmailHeaders,
+			senderEmail: string,
+		): Promise<boolean> {
+			const token = await getAccessToken();
+			if (!token || !message.threadId) return false;
+
+			for (const rfc822Id of referencedMessageIds(message)) {
+				const query = encodeURIComponent(`in:sent rfc822msgid:${rfc822Id}`);
+				const listed = await apiGet<MessagesListResponse>(
+					`/messages?q=${query}&maxResults=5`,
+					token,
+				);
+				for (const candidate of listed?.messages ?? []) {
+					const sent = await apiGet<MessageGetResponse>(
+						`/messages/${candidate.id}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=To&metadataHeaders=Cc`,
+						token,
+					);
+					const headers = sent?.payload?.headers;
+					if (!headers || sent.threadId !== message.threadId) continue;
+					if (getHeader(headers, "Message-ID").trim() !== rfc822Id) continue;
+					const recipients = new Set([
+						...recipientAddresses(getHeader(headers, "To")),
+						...recipientAddresses(getHeader(headers, "Cc")),
+					]);
+					if (recipients.has(senderEmail.toLowerCase())) return true;
+				}
+			}
+			return false;
 		},
 
 		async archiveMessage(messageId: string): Promise<boolean> {

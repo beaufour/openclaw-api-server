@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	authenticatedSenderIdentity,
 	checkSenderAuth,
 	extractFromEmail,
 	isAllowlisted,
@@ -9,6 +10,49 @@ import {
 import { createLogger } from "../src/logger.js";
 
 const logger = createLogger("test-dkim");
+
+describe("authenticatedSenderIdentity", () => {
+	const signature =
+		"v=1; d=spotify.com; s=selector; h=from:to:subject; b=abc123xyz";
+	const auth =
+		"mx.google.com; dkim=pass header.d=spotify.com header.s=selector header.b=abc123; spf=pass; dmarc=pass header.from=spotify.com";
+
+	it("accepts one aligned From covered by aligned DKIM plus DMARC", () => {
+		expect(
+			authenticatedSenderIdentity(auth, "Allan <allanb@spotify.com>", [
+				signature,
+			]),
+		).toEqual({ email: "allanb@spotify.com", domain: "spotify.com" });
+	});
+
+	it("rejects missing DMARC, DKIM domain misalignment, and unsigned From", () => {
+		expect(
+			authenticatedSenderIdentity(
+				auth.replace("dmarc=pass", "dmarc=fail"),
+				"allanb@spotify.com",
+				[signature],
+			),
+		).toBeUndefined();
+		expect(
+			authenticatedSenderIdentity(auth, "allan@example.com", [signature]),
+		).toBeUndefined();
+		expect(
+			authenticatedSenderIdentity(auth, "allanb@spotify.com", [
+				signature.replace("h=from:to:subject", "h=to:subject"),
+			]),
+		).toBeUndefined();
+	});
+
+	it("rejects ambiguous From identities", () => {
+		expect(
+			authenticatedSenderIdentity(
+				auth,
+				"allanb@spotify.com, attacker@spotify.com",
+				[signature],
+			),
+		).toBeUndefined();
+	});
+});
 
 describe("parseDkimResult", () => {
 	it("parses a passing DKIM result with domain", () => {

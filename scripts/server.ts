@@ -81,6 +81,7 @@ const gateway = DRY_RUN
 			secret: GATEWAY_SECRET,
 			logger,
 			logPayload: LOG_PAYLOAD,
+			routeProfiles: { gmail: "default" },
 		});
 
 // Only build the headers fetcher when DKIM enforcement is on, so the rest of
@@ -97,11 +98,11 @@ const gmailHeadersFetcher = config.gmailRequireDkim
 const GMAIL_WAKE_DEBOUNCE_MS = Number(
 	process.env.GMAIL_WAKE_DEBOUNCE_MS ?? 15000,
 );
-const scheduleGmailWake = createFixedWindowCoalescer<
-	Record<string, unknown>
->({
+const scheduleGmailWake = createFixedWindowCoalescer<Record<string, unknown>>({
 	delayMs: GMAIL_WAKE_DEBOUNCE_MS,
-	dispatch: (payload) => gateway.forward("gmail", payload),
+	dispatch: async (payload) => {
+		await gateway.forward("gmail", payload);
+	},
 	onError: (error) =>
 		logger.error("Failed to forward coalesced Gmail wake", {
 			error: error instanceof Error ? error.message : String(error),
@@ -239,6 +240,7 @@ server.listen(PORT, () => {
 		"STRAVA_VERIFY_TOKEN",
 		"ASANA_WEBHOOK_SECRET",
 		"GMAIL_PUBSUB_AUDIENCE",
+		"GMAIL_PUBSUB_SERVICE_ACCOUNT",
 		"GMAIL_REQUIRE_DKIM",
 		"GMAIL_DKIM_MODE",
 		"OPENCLAW_HOOK_TOKEN",

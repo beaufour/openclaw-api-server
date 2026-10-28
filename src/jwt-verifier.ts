@@ -10,12 +10,18 @@ import type { JwtVerifier } from "./handlers/gmail.js";
 const client = new OAuth2Client();
 
 export const googleJwtVerifier: JwtVerifier = {
-	async verify(token: string, audience: string): Promise<{ email?: string }> {
+	async verify(
+		token: string,
+		audience: string,
+	): Promise<{ email?: string; emailVerified?: boolean }> {
 		const ticket = await client.verifyIdToken({
 			idToken: token,
 			audience,
 		});
 		const payload = ticket.getPayload();
-		return { email: payload?.email };
+		return {
+			email: payload?.email,
+			emailVerified: payload?.email_verified === true,
+		};
 	},
 };

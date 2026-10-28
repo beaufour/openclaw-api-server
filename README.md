@@ -65,6 +65,7 @@ Config is read from a `.env` file in the repo root (or real environment variable
 | `STRAVA_VERIFY_TOKEN` | Token for Strava subscription validation | (empty) |
 | `STRAVA_WEBHOOK_SECRET` | Secret path segment in the Strava callback URL | (empty) |
 | `GMAIL_PUBSUB_AUDIENCE` | Audience for Pub/Sub OIDC JWT validation | (empty, skips auth) |
+| `GMAIL_PUBSUB_SERVICE_ACCOUNT` | Exact verified service-account email allowed to push | (empty, not pinned) |
 | `GMAIL_PUBSUB_TOPIC` | Full Pub/Sub topic name; enables daily in-process Gmail watch renewal | (empty, renewal disabled) |
 | `GMAIL_REQUIRE_DKIM` | Set to `true` to verify DKIM and check the sender allowlist | `false` |
 | `DATA_DIR` | Directory for persisted state (Asana secrets, allowlist) | `~/.openclaw-api-server` |

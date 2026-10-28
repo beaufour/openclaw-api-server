@@ -18,6 +18,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 		stravaVerifyToken: STRAVA_VERIFY_TOKEN,
 		stravaWebhookSecret: STRAVA_SECRET,
 		gmailPubsubAudience: "",
+		gmailPubsubServiceAccount: "",
 		gmailRequireDkim: false,
 		gmailSenderAllowlist: [],
 		dataDir: "/tmp/test-data",

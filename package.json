@@ -12,7 +12,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "npx tsx scripts/server.ts",
+    "build:server": "tsc --project tsconfig.server.json",
+    "start": "node dist-runtime/scripts/server.js",
     "dev": "npx tsx --watch scripts/server.ts --dry-run",
     "test": "vitest run",
     "test:watch": "vitest",

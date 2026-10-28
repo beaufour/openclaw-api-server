@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "outDir": "dist-runtime",
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "scripts/server.ts", "scripts/publisher-mail-worker.ts", "scripts/reprocess-gmail-message.ts"],
+  "exclude": ["node_modules", "dist", "dist-runtime", "tests"]
+}

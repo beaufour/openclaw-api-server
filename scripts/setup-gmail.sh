@@ -155,7 +155,9 @@ gcloud pubsub subscriptions update "$SUBSCRIPTION_NAME" \
     --push-auth-service-account="$PUSH_SA_EMAIL" \
     --push-auth-token-audience="$WEBHOOK_URL" \
     --quiet
-echo "    OIDC token configured. Set GMAIL_PUBSUB_AUDIENCE=${WEBHOOK_URL}"
+echo "    OIDC token configured. Set these receiver variables:"
+echo "    GMAIL_PUBSUB_AUDIENCE=${WEBHOOK_URL}"
+echo "    GMAIL_PUBSUB_SERVICE_ACCOUNT=${PUSH_SA_EMAIL}"
 
 # --- Step 6: OAuth2 for Gmail account ---
 

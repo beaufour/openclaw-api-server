@@ -16,6 +16,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 		stravaVerifyToken: "",
 		stravaWebhookSecret: "",
 		gmailPubsubAudience: "",
+		gmailPubsubServiceAccount: "",
 		gmailRequireDkim: false,
 		// Fixture defaults to "enforce" so the DKIM drop tests below stay
 		// meaningful; production loadConfig() defaults to "monitor".
@@ -41,7 +42,7 @@ function gmailBody(
 }
 
 const passingVerifier: JwtVerifier = {
-	verify: async () => ({ email: "pubsub@google.com" }),
+	verify: async () => ({ email: "pubsub@google.com", emailVerified: true }),
 };
 
 const failingVerifier: JwtVerifier = {
@@ -93,6 +94,34 @@ describe("Gmail Auth", () => {
 	it("accepts valid JWT token", async () => {
 		const config = makeConfig({
 			gmailPubsubAudience: "https://webhooks.example.com",
+		});
+		const result = await verifyAuthHeader(
+			"Bearer valid-token",
+			config,
+			passingVerifier,
+			logger,
+		);
+		expect(result).toBe(true);
+	});
+
+	it("rejects a valid Google token from the wrong service account", async () => {
+		const config = makeConfig({
+			gmailPubsubAudience: "https://webhooks.example.com",
+			gmailPubsubServiceAccount: "expected@project.iam.gserviceaccount.com",
+		});
+		const result = await verifyAuthHeader(
+			"Bearer valid-token",
+			config,
+			passingVerifier,
+			logger,
+		);
+		expect(result).toBe(false);
+	});
+
+	it("accepts the pinned, verified Pub/Sub service account", async () => {
+		const config = makeConfig({
+			gmailPubsubAudience: "https://webhooks.example.com",
+			gmailPubsubServiceAccount: "pubsub@google.com",
 		});
 		const result = await verifyAuthHeader(
 			"Bearer valid-token",
@@ -546,5 +575,82 @@ describe("Gmail approved-gate sweep", () => {
 			fetcher,
 		);
 		expect(labels).toEqual([{ id: "BAD1", label: "rejected", archive: false }]);
+	});
+
+	it("admits an authenticated reply from an original Sent recipient", async () => {
+		const reply = {
+			from: "Allan Beaufour <allanb@spotify.com>",
+			authenticationResults:
+				"mx.google.com; dkim=pass header.d=spotify.com header.s=s1 header.b=abc; spf=pass; dmarc=pass header.from=spotify.com",
+			dkimSignatures: ["v=1; d=spotify.com; s=s1; h=from:to:subject; b=abcdef"],
+			fromHeaderUnique: true,
+			threadId: "thread-1",
+			inReplyTo: "<our-message@gmail.com>",
+			messageId: "REPLY1",
+		};
+		const labels: Array<{ id: string; label: string; archive: boolean }> = [];
+		let verifiedSender = "";
+		const fetcher: EmailHeadersFetcher = {
+			fetchHeaders: async () => null,
+			listUnreadInbox: async () => [reply],
+			verifySentReplyChain: async (_message, sender) => {
+				verifiedSender = sender;
+				return true;
+			},
+			labelMessage: async (id, label, archive = false) => {
+				labels.push({ id, label, archive });
+				return true;
+			},
+		};
+		const result = await handleGmailWebhook(
+			gmailBody("petter@beaufour.dk", "403"),
+			undefined,
+			makeConfig({
+				gmailRequireDkim: true,
+				gmailDkimMode: "enforce",
+				gmailSenderAllowlist: allowlist,
+			}),
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(verifiedSender).toBe("allanb@spotify.com");
+		expect(labels).toEqual([
+			{ id: "REPLY1", label: "approved", archive: false },
+		]);
+		expect(result.payload).toBeDefined();
+	});
+
+	it("does not use thread membership to bypass failed authentication", async () => {
+		let chainChecked = false;
+		const fetcher: EmailHeadersFetcher = {
+			fetchHeaders: async () => null,
+			listUnreadInbox: async () => [
+				{
+					...REJECTED,
+					fromHeaderUnique: true,
+					threadId: "thread-1",
+					inReplyTo: "<our-message@gmail.com>",
+				},
+			],
+			verifySentReplyChain: async () => {
+				chainChecked = true;
+				return true;
+			},
+			labelMessage: async () => true,
+		};
+		await handleGmailWebhook(
+			gmailBody("petter@beaufour.dk", "404"),
+			undefined,
+			makeConfig({
+				gmailRequireDkim: true,
+				gmailDkimMode: "enforce",
+				gmailSenderAllowlist: allowlist,
+			}),
+			passingVerifier,
+			logger,
+			fetcher,
+		);
+		expect(chainChecked).toBe(false);
 	});
 });

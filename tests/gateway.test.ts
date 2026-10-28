@@ -115,3 +115,53 @@ describe("agent gateway forwarding", () => {
 		});
 	});
 });
+
+it.each([
+	"default",
+	"publisher",
+])("uses trusted explicit profile %s instead of payload fields", async (profile) => {
+	const capture = await captureRequest();
+	const client = createAgentGatewayClient({
+		backend: "hermes",
+		baseUrl: capture.baseUrl,
+		secret: "test",
+		logger,
+		routeProfiles: { gmail: profile },
+	});
+	expect(
+		await client.forward(
+			"gmail",
+			{ profile: "attacker", url: "https://example.invalid" },
+			"stable-delivery-1",
+		),
+	).toBe(true);
+	const received = await capture.request;
+	expect(received.path).toBe(`/p/${profile}/webhooks/gmail`);
+	expect(received.headers["x-request-id"]).toBe("stable-delivery-1");
+});
+it("rejects profile path injection at configuration time", () => {
+	expect(() =>
+		createAgentGatewayClient({
+			backend: "hermes",
+			baseUrl: "http://localhost",
+			secret: "test",
+			logger,
+			routeProfiles: { gmail: "../default" },
+		}),
+	).toThrow();
+});
+
+it("does not checkpoint a notification on HTTP 202 agent acceptance", async () => {
+	const capture = await captureRequest();
+	const client = createAgentGatewayClient({
+		backend: "hermes",
+		baseUrl: capture.baseUrl,
+		secret: "test",
+		logger,
+		requireDelivered: true,
+		routeProfiles: { "gmail-publisher": "publisher" },
+	});
+	expect(await client.forward("gmail-publisher", { report: "test" })).toBe(
+		false,
+	);
+});
