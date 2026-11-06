@@ -28,6 +28,10 @@ export interface HealthCheckDefinition {
 	remedy: string;
 	/** Fail the check when no success has been recorded for this long. */
 	maxSilenceMs?: number;
+	/** State wording in alerts (default "failing"), e.g. "due for renewal". */
+	failingLabel?: string;
+	/** Wording when the check clears (default "recovered"), e.g. "renewed". */
+	recoveredLabel?: string;
 }
 
 export interface HealthAlert {
@@ -128,19 +132,20 @@ export function createHealthMonitor(
 	function render(check: string, state: CheckState): HealthAlert {
 		const def = checks[check];
 		const kind = state.pending ?? "failing";
+		const label = def.failingLabel ?? "failing";
 		if (kind === "recovered") {
 			return {
 				check,
 				kind,
-				text: `✅ ${source}: ${def.title} recovered (was failing since ${iso(state.failingSince)}).`,
+				text: `✅ ${source}: ${def.title} ${def.recoveredLabel ?? "recovered"} (was ${label} since ${iso(state.failingSince)}).`,
 			};
 		}
-		const lead = kind === "reminder" ? "🚨 Still failing" : "🚨";
+		const lead = kind === "reminder" ? "🚨 Still:" : "🚨";
 		return {
 			check,
 			kind,
 			text:
-				`${lead} ${source}: ${def.title} failing since ${iso(state.failingSince)}` +
+				`${lead} ${source}: ${def.title} ${label} since ${iso(state.failingSince)}` +
 				` (${state.lastDetail ?? "unknown error"}). ${def.impact} Fix: ${def.remedy}`,
 		};
 	}

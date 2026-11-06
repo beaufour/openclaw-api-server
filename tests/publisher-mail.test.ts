@@ -6,6 +6,7 @@ import {
 	boundedJson,
 	classifierRequest,
 	extract,
+	grantRenewalStatus,
 	makePreview,
 	OAuthRefreshError,
 	PublisherMailClient,
@@ -107,6 +108,17 @@ describe("untrusted mail containment", () => {
 		const client = new PublisherMailClient("/unused", "expected", fetchFn);
 		await expect(client.get(path)).rejects.toThrow();
 		expect(fetchFn).not.toHaveBeenCalled();
+	});
+	it("flags the Testing-mode grant for renewal 36h before it expires", () => {
+		const granted = Date.UTC(2026, 10, 6, 23, 47);
+		const day = 86_400_000;
+		expect(grantRenewalStatus(granted, granted + 5 * day)).toEqual({
+			due: false,
+			expiresAt: granted + 7 * day,
+		});
+		expect(grantRenewalStatus(granted, granted + 5.4 * day).due).toBe(false);
+		expect(grantRenewalStatus(granted, granted + 5.5 * day).due).toBe(true);
+		expect(grantRenewalStatus(granted, granted + 8 * day).due).toBe(true);
 	});
 	it("surfaces only the OAuth error code when token refresh fails", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "publisher-test-"));

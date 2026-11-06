@@ -225,6 +225,21 @@ export async function boundedJson(
 		await reader.cancel();
 	}
 }
+/**
+ * Google expires refresh tokens of OAuth apps in "Testing" status 7 days after
+ * consent. The token file is written only by reauthorization, so its mtime is
+ * the grant time. `due` turns true `warnMs` before the expected expiry.
+ */
+export function grantRenewalStatus(
+	grantedAtMs: number,
+	nowMs: number,
+	lifetimeMs = 7 * 86_400_000,
+	warnMs = 36 * 3_600_000,
+): { due: boolean; expiresAt: number } {
+	const expiresAt = grantedAtMs + lifetimeMs;
+	return { due: nowMs >= expiresAt - warnMs, expiresAt };
+}
+
 /** Token refresh rejected by Google; `code` is a sanitized OAuth error code. */
 export class OAuthRefreshError extends Error {
 	constructor(readonly code: string) {

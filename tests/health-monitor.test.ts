@@ -112,7 +112,9 @@ describe("health monitor", () => {
 		health.fail("gmail-oauth", "deleted_client", { permanent: true });
 		await health.flush();
 		expect(sent.map((a) => a.kind)).toEqual(["failing", "reminder"]);
-		expect(sent[1].text).toMatch(/^🚨 Still failing/);
+		expect(sent[1].text).toMatch(
+			/^🚨 Still: Gmail receiver: Gmail OAuth token refresh failing since/,
+		);
 	});
 
 	it("keeps undelivered alerts queued across restarts and retries them", async () => {
@@ -155,6 +157,38 @@ describe("health monitor", () => {
 		health.ok("gmail-watch");
 		await health.flush();
 		expect(sent.map((a) => a.kind)).toEqual(["failing", "recovered"]);
+	});
+
+	it("uses per-check wording for warnings and recovery", async () => {
+		const dir = tempDir();
+		const sent: HealthAlert[] = [];
+		const health = createHealthMonitor({
+			statePath: `${dir}/health.json`,
+			checks: {
+				grant: {
+					title: "Gmail OAuth grant",
+					failingLabel: "due for renewal",
+					recoveredLabel: "renewed",
+					impact: "Mail stops after expiry.",
+					remedy: "reauthorize.",
+				},
+			},
+			send: async (a) => {
+				sent.push(a);
+				return true;
+			},
+			logger,
+			source: "Publisher mail",
+			now: () => Date.UTC(2026, 10, 12, 11, 47),
+		});
+		health.fail("grant", "expires 2026-11-13 23:47 UTC", { permanent: true });
+		await health.flush();
+		health.ok("grant");
+		await health.flush();
+		expect(sent.map((a) => a.text)).toEqual([
+			"🚨 Publisher mail: Gmail OAuth grant due for renewal since 2026-11-12 11:47 UTC (expires 2026-11-13 23:47 UTC). Mail stops after expiry. Fix: reauthorize.",
+			"✅ Publisher mail: Gmail OAuth grant renewed (was due for renewal since 2026-11-12 11:47 UTC).",
+		]);
 	});
 
 	it("rejects unknown checks and sanitizes detail", () => {

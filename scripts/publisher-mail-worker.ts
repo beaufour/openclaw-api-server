@@ -1,5 +1,5 @@
 /** Dedicated process: credentials/state are never mounted in Hermes. */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createAgentGatewayClient } from "../src/gateway.js";
 import {
@@ -8,6 +8,7 @@ import {
 } from "../src/health-monitor.js";
 import { createLogger } from "../src/logger.js";
 import {
+	grantRenewalStatus,
 	OAuthRefreshError,
 	PublisherMailClient,
 	runCycle,
@@ -53,6 +54,17 @@ const health = createHealthMonitor({
 			remedy:
 				"an OAuth error needs `python3 scripts/reauth-publisher-mail.py` on the host (OAuth app must be In production, not Testing, or tokens expire after 7 days); otherwise check `docker compose logs publisher-mail`.",
 			maxSilenceMs: 3_600_000,
+		},
+		// The OAuth app must stay in "Testing", so the grant expires every 7
+		// days; warn ahead of time instead of only after mail stops.
+		"publisher-mail-grant": {
+			title: "Gmail OAuth grant",
+			failingLabel: "due for renewal",
+			recoveredLabel: "renewed",
+			impact:
+				"The grant expires 7 days after consent (Testing-mode limit); after that reader mail stops being processed.",
+			remedy:
+				"run `python3 scripts/reauth-publisher-mail.py` in an interactive host terminal.",
 		},
 	},
 	failureThreshold: 3,
@@ -100,6 +112,23 @@ if (process.argv.includes("--check")) {
 					code ? `token refresh: ${code}` : "mail cycle error",
 					{ permanent: isPermanentOAuthError(code) },
 				);
+			}
+			try {
+				const grant = grantRenewalStatus(
+					statSync(join(dir, "google_token.json")).mtimeMs,
+					Date.now(),
+				);
+				const expires = new Date(grant.expiresAt)
+					.toISOString()
+					.slice(0, 16)
+					.replace("T", " ");
+				if (grant.due)
+					health.fail("publisher-mail-grant", `expires ${expires} UTC`, {
+						permanent: true,
+					});
+				else health.ok("publisher-mail-grant");
+			} catch {
+				// A missing token file already fails the mail cycle check.
 			}
 			await health.tick();
 		}
