@@ -35,7 +35,9 @@ OAUTH_CLIENT_NAME="gmail-webhook-client"
 # archive rejected mail out of the inbox in enforce mode. Use gmail.readonly
 # instead if you don't want archive-on-reject.
 GMAIL_SCOPE="https://www.googleapis.com/auth/gmail.modify"
-REDIRECT_URI="urn:ietf:wg:oauth:2.0:oob"
+# OAuth consent uses a loopback redirect handled by this helper (Google
+# blocked the old out-of-band copy/paste flow). Requires a Desktop-app client.
+OAUTH_HELPER="$(cd "$(dirname "$0")" && pwd)/_gmail-oauth-loopback.mjs"
 
 # --- Argument parsing ---
 
@@ -205,7 +207,14 @@ if [[ -f "$CREDENTIALS_FILE" ]]; then
                 echo "    Token refreshed successfully."
                 NEED_AUTH=0
             else
-                echo "    Token refresh failed — will re-authorize (reusing the client)."
+                REFRESH_ERROR=$(echo "$TOKEN_RESPONSE" | jq -r '.error // empty')
+                if [[ "$REFRESH_ERROR" == "deleted_client" || "$REFRESH_ERROR" == "invalid_client" ]]; then
+                    echo "    Token refresh failed (${REFRESH_ERROR}) — the OAuth client is gone; enter a new one."
+                    CLIENT_ID=""
+                    CLIENT_SECRET=""
+                else
+                    echo "    Token refresh failed — will re-authorize (reusing the client)."
+                fi
             fi
             ;;
     esac
@@ -224,38 +233,16 @@ if [[ "$NEED_AUTH" == "1" ]]; then
         echo "    Steps: '+ CREATE CREDENTIALS' > 'OAuth client ID' > 'Desktop app'"
         echo ""
         read -rp "    Enter Client ID: " CLIENT_ID
-        read -rp "    Enter Client Secret: " CLIENT_SECRET
+        read -rsp "    Enter Client Secret (hidden): " CLIENT_SECRET
+        echo ""
     fi
 
-    # Build authorization URL
-    AUTH_URL="https://accounts.google.com/o/oauth2/v2/auth"
-    AUTH_URL+="?client_id=${CLIENT_ID}"
-    AUTH_URL+="&redirect_uri=${REDIRECT_URI}"
-    AUTH_URL+="&response_type=code"
-    AUTH_URL+="&scope=${GMAIL_SCOPE}"
-    AUTH_URL+="&access_type=offline"
-    AUTH_URL+="&prompt=consent"
-
+    # Consent in the browser and exchange the code via the loopback helper.
     echo ""
-    echo "    Opening browser for Gmail authorization..."
-    echo "    Sign in with the Gmail account you want to MONITOR (not your GCP account)."
-    echo ""
-    echo "    If the browser doesn't open, visit this URL:"
-    echo "    ${AUTH_URL}"
-    echo ""
-
-    # Try to open browser
-    open "$AUTH_URL" 2>/dev/null || xdg-open "$AUTH_URL" 2>/dev/null || true
-
-    read -rp "    Paste the authorization code here: " AUTH_CODE
-
-    # Exchange code for tokens
-    TOKEN_RESPONSE=$(curl -s -X POST "https://oauth2.googleapis.com/token" \
-        -d "code=${AUTH_CODE}" \
-        -d "client_id=${CLIENT_ID}" \
-        -d "client_secret=${CLIENT_SECRET}" \
-        -d "redirect_uri=${REDIRECT_URI}" \
-        -d "grant_type=authorization_code")
+    echo "    Sign in as the Gmail account to MONITOR (not necessarily your GCP account)."
+    TOKEN_RESPONSE=$(GMAIL_CLIENT_ID="$CLIENT_ID" GMAIL_CLIENT_SECRET="$CLIENT_SECRET" \
+        GMAIL_SCOPE="$GMAIL_SCOPE" GMAIL_LOGIN_HINT="${GMAIL_LOGIN_HINT:-}" \
+        node "$OAUTH_HELPER")
 
     ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token // empty')
     REFRESH_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.refresh_token // empty')
