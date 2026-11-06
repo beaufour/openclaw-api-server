@@ -13,6 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import http from "node:http";
+import { join } from "node:path";
 
 // Load .env file if it exists (before importing config)
 try {
@@ -49,6 +50,11 @@ import {
 	handleStravaValidation,
 	handleStravaWebhook,
 } from "../src/handlers/strava.js";
+import {
+	createHealthMonitor,
+	type HealthAlert,
+	type HealthCheckDefinition,
+} from "../src/health-monitor.js";
 import { googleJwtVerifier } from "../src/jwt-verifier.js";
 import { createLogger } from "../src/logger.js";
 
@@ -84,10 +90,78 @@ const gateway = DRY_RUN
 			routeProfiles: { gmail: "default" },
 		});
 
+// Operational alerts go to a Hermes deliver-only route ("ops-alert"), which
+// posts the text straight to Slack without an agent run. Delivery must be
+// confirmed; otherwise the alert stays queued and is retried.
+const alertGateway =
+	!DRY_RUN && GATEWAY_BACKEND === "hermes"
+		? createAgentGatewayClient({
+				backend: "hermes",
+				baseUrl: GATEWAY_URL,
+				secret: GATEWAY_SECRET,
+				logger,
+				routeProfiles: { "ops-alert": "default" },
+				requireDelivered: true,
+			})
+		: undefined;
+async function sendHealthAlert(alert: HealthAlert): Promise<boolean> {
+	if (!alertGateway) {
+		logger.warn("Health alert (not forwarded: no Hermes backend)", {
+			check: alert.check,
+			kind: alert.kind,
+			text: alert.text,
+		});
+		return true;
+	}
+	return alertGateway.forward(
+		"ops-alert",
+		{ check: alert.check, kind: alert.kind, text: alert.text },
+		`ops-alert-${alert.check}-${alert.kind}-${Date.now()}`,
+	);
+}
+
+const gmailPubsubTopic = process.env.GMAIL_PUBSUB_TOPIC ?? "";
+const healthChecks: Record<string, HealthCheckDefinition> = {};
+if (config.gmailRequireDkim) {
+	healthChecks["gmail-oauth"] = {
+		title: "Gmail OAuth token refresh",
+		impact:
+			"New mail is not being vetted, approved, or forwarded to Hermes.",
+		remedy:
+			"create a Desktop OAuth client in the Pub/Sub topic's GCP project, run scripts/reauth-gmail.sh --new-client (or plain reauth-gmail.sh if only the grant was revoked), then restart openclaw-api-server.",
+	};
+}
+if (gmailPubsubTopic) {
+	healthChecks["gmail-watch"] = {
+		title: "Gmail watch renewal",
+		impact:
+			"Gmail push notifications stop entirely once the current watch expires (7 days after the last renewal).",
+		remedy:
+			"check openclaw-api-server logs; a token error needs scripts/reauth-gmail.sh, a watch() 403/404 needs the Pub/Sub topic and its gmail-api-push publisher grant checked.",
+		maxSilenceMs: 36 * 3_600_000,
+	};
+}
+const health = createHealthMonitor({
+	statePath: join(config.dataDir, "health_alerts.json"),
+	checks: healthChecks,
+	send: sendHealthAlert,
+	logger,
+	source: "Gmail receiver",
+});
+
 // Only build the headers fetcher when DKIM enforcement is on, so the rest of
 // the server has no dependency on Gmail OAuth credentials being present.
 const gmailHeadersFetcher = config.gmailRequireDkim
-	? createGmailHeadersFetcher({ dataDir: config.dataDir, logger })
+	? createGmailHeadersFetcher({
+			dataDir: config.dataDir,
+			logger,
+			onTokenRefresh: (result) =>
+				result.ok
+					? health.ok("gmail-oauth")
+					: health.fail("gmail-oauth", result.detail, {
+							permanent: result.permanent,
+						}),
+		})
 	: undefined;
 
 // Gmail emits several Pub/Sub pushes per change. Waking immediately and then
@@ -226,6 +300,11 @@ server.listen(PORT, () => {
 			url: GATEWAY_URL,
 		});
 	}
+	// Evaluate silence limits and retry undelivered alerts periodically.
+	const HEALTH_TICK_MS = Number(process.env.HEALTH_TICK_MS ?? 600_000);
+	setInterval(() => void health.tick(), HEALTH_TICK_MS);
+	void health.tick();
+
 	logger.info("Routes:", {
 		routes: [
 			"GET  /health",
@@ -271,12 +350,17 @@ server.listen(PORT, () => {
 		});
 	}
 
-	const gmailPubsubTopic = process.env.GMAIL_PUBSUB_TOPIC ?? "";
 	if (gmailPubsubTopic) {
 		startGmailWatchRenewal({
 			dataDir: config.dataDir,
 			topic: gmailPubsubTopic,
 			logger,
+			report: (ok, detail, permanent) =>
+				ok
+					? health.ok("gmail-watch")
+					: health.fail("gmail-watch", detail ?? "unknown error", {
+							permanent,
+						}),
 		});
 	} else {
 		logger.warn(

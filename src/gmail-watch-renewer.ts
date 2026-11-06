@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { isPermanentOAuthError, oauthErrorCode } from "./health-monitor.js";
 import type { Logger } from "./logger.js";
 
 interface OAuthCredentials {
@@ -13,12 +14,20 @@ export interface GmailWatchRenewalOptions {
 	topic: string;
 	logger: Logger;
 	fetchFn?: typeof fetch;
+	/** Reports each renewal outcome (for health alerting). */
+	report?: (ok: boolean, detail?: string, permanent?: boolean) => void;
 }
 
 export async function renewGmailWatch(
 	options: GmailWatchRenewalOptions,
 ): Promise<boolean> {
-	const { dataDir, topic, logger, fetchFn = fetch } = options;
+	const {
+		dataDir,
+		topic,
+		logger,
+		fetchFn = fetch,
+		report = () => {},
+	} = options;
 	let credentials: OAuthCredentials;
 	try {
 		credentials = JSON.parse(
@@ -26,6 +35,7 @@ export async function renewGmailWatch(
 		) as OAuthCredentials;
 	} catch {
 		logger.error("Could not read Gmail OAuth credentials for watch renewal");
+		report(false, "credentials file unreadable", true);
 		return false;
 	}
 
@@ -35,6 +45,7 @@ export async function renewGmailWatch(
 		!credentials.refresh_token
 	) {
 		logger.error("Gmail OAuth credentials are incomplete for watch renewal");
+		report(false, "credentials file incomplete", true);
 		return false;
 	}
 
@@ -50,13 +61,19 @@ export async function renewGmailWatch(
 			}).toString(),
 		});
 		if (!tokenResponse.ok) {
+			const code = await oauthErrorCode(tokenResponse);
 			logger.error("Gmail watch token refresh failed", {
 				status: tokenResponse.status,
+				error: code,
 			});
+			report(false, `token refresh: ${code}`, isPermanentOAuthError(code));
 			return false;
 		}
 		const token = (await tokenResponse.json()) as { access_token?: string };
-		if (!token.access_token) return false;
+		if (!token.access_token) {
+			report(false, "token refresh returned no access_token");
+			return false;
+		}
 
 		const watchResponse = await fetchFn(
 			"https://gmail.googleapis.com/gmail/v1/users/me/watch",
@@ -73,17 +90,20 @@ export async function renewGmailWatch(
 			logger.error("Gmail watch renewal failed", {
 				status: watchResponse.status,
 			});
+			report(false, `watch() HTTP ${watchResponse.status}`);
 			return false;
 		}
 		const result = (await watchResponse.json()) as { expiration?: string };
 		logger.info("Gmail watch renewed", {
 			expiration: result.expiration ?? "unknown",
 		});
+		report(true);
 		return true;
 	} catch (error) {
 		logger.error("Gmail watch renewal threw", {
 			error: error instanceof Error ? error.message : String(error),
 		});
+		report(false, "Google API unreachable");
 		return false;
 	}
 }

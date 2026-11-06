@@ -21,6 +21,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { isPermanentOAuthError, oauthErrorCode } from "../health-monitor.js";
 import type { Logger } from "../logger.js";
 import type { EmailHeaders, EmailHeadersFetcher } from "./gmail.js";
 
@@ -65,7 +66,13 @@ export interface GmailHeadersFetcherOptions {
 	fetchFn?: typeof fetch;
 	/** Injectable clock for tests; returns epoch ms. */
 	now?: () => number;
+	/** Reports each OAuth token refresh outcome (for health alerting). */
+	onTokenRefresh?: (result: TokenRefreshResult) => void;
 }
+
+export type TokenRefreshResult =
+	| { ok: true }
+	| { ok: false; detail: string; permanent: boolean };
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -155,6 +162,7 @@ export function createGmailHeadersFetcher(
 		trustedAuthservId = process.env.GMAIL_TRUSTED_AUTHSERV ?? "mx.google.com",
 		fetchFn = fetch,
 		now = () => Date.now(),
+		onTokenRefresh = () => {},
 	} = options;
 
 	const credsPath = join(dataDir, "gmail_oauth_credentials.json");
@@ -189,7 +197,14 @@ export function createGmailHeadersFetcher(
 		}
 
 		const creds = loadCredentials();
-		if (!creds) return null;
+		if (!creds) {
+			onTokenRefresh({
+				ok: false,
+				detail: "credentials file missing or incomplete",
+				permanent: true,
+			});
+			return null;
+		}
 
 		const params = new URLSearchParams({
 			client_id: creds.client_id,
@@ -205,7 +220,16 @@ export function createGmailHeadersFetcher(
 				body: params.toString(),
 			});
 			if (!res.ok) {
-				logger.error("Gmail token refresh failed", { status: res.status });
+				const code = await oauthErrorCode(res);
+				logger.error("Gmail token refresh failed", {
+					status: res.status,
+					error: code,
+				});
+				onTokenRefresh({
+					ok: false,
+					detail: code,
+					permanent: isPermanentOAuthError(code),
+				});
 				return null;
 			}
 			const json = (await res.json()) as {
@@ -214,14 +238,25 @@ export function createGmailHeadersFetcher(
 			};
 			if (!json.access_token) {
 				logger.error("Gmail token refresh returned no access_token");
+				onTokenRefresh({
+					ok: false,
+					detail: "no access_token in response",
+					permanent: false,
+				});
 				return null;
 			}
 			cachedToken = json.access_token;
 			tokenExpiresAt = now() + (json.expires_in ?? 3600) * 1000;
+			onTokenRefresh({ ok: true });
 			return cachedToken;
 		} catch (err) {
 			logger.error("Gmail token refresh threw", {
 				error: err instanceof Error ? err.message : String(err),
+			});
+			onTokenRefresh({
+				ok: false,
+				detail: "token endpoint unreachable",
+				permanent: false,
 			});
 			return null;
 		}
