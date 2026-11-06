@@ -2,6 +2,7 @@
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { GatewayClient } from "./gateway.js";
+import { oauthErrorCode } from "./health-monitor.js";
 
 export const LABELS = [
 	"PRAISE",
@@ -224,6 +225,14 @@ export async function boundedJson(
 		await reader.cancel();
 	}
 }
+/** Token refresh rejected by Google; `code` is a sanitized OAuth error code. */
+export class OAuthRefreshError extends Error {
+	constructor(readonly code: string) {
+		super(`OAuth token refresh failed: ${code}`);
+		this.name = "OAuthRefreshError";
+	}
+}
+
 export class PublisherMailClient {
 	private token = "";
 	constructor(
@@ -235,8 +244,9 @@ export class PublisherMailClient {
 		const c = JSON.parse(
 			readFileSync(join(this.dir, "google_token.json"), "utf8"),
 		);
-		const result = (await boundedJson(
-			await this.fetchFn("https://oauth2.googleapis.com/token", {
+		const tokenResponse = await this.fetchFn(
+			"https://oauth2.googleapis.com/token",
+			{
 				method: "POST",
 				redirect: "error",
 				signal: AbortSignal.timeout(20000),
@@ -246,9 +256,15 @@ export class PublisherMailClient {
 					refresh_token: c.refresh_token,
 					grant_type: "refresh_token",
 				}),
-			}),
-			16000,
-		)) as { access_token?: string };
+			},
+		);
+		// Surface only the sanitized OAuth error code (e.g. invalid_grant) so
+		// the worker can alert on it; never the provider's response body.
+		if (!tokenResponse.ok)
+			throw new OAuthRefreshError(await oauthErrorCode(tokenResponse));
+		const result = (await boundedJson(tokenResponse, 16000)) as {
+			access_token?: string;
+		};
 		if (!result.access_token) throw new Error("Missing access token");
 		this.token = result.access_token;
 		const profile = (await this.get("/profile")) as { emailAddress?: string };

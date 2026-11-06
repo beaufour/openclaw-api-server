@@ -7,6 +7,7 @@ import {
 	classifierRequest,
 	extract,
 	makePreview,
+	OAuthRefreshError,
 	PublisherMailClient,
 	parseClassification,
 	quoteForSlack,
@@ -106,6 +107,34 @@ describe("untrusted mail containment", () => {
 		const client = new PublisherMailClient("/unused", "expected", fetchFn);
 		await expect(client.get(path)).rejects.toThrow();
 		expect(fetchFn).not.toHaveBeenCalled();
+	});
+	it("surfaces only the OAuth error code when token refresh fails", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "publisher-test-"));
+		dirs.push(dir);
+		writeFileSync(
+			join(dir, "google_token.json"),
+			JSON.stringify({
+				client_id: "c",
+				client_secret: "s",
+				refresh_token: "r",
+			}),
+		);
+		const fetchFn = vi.fn().mockResolvedValue(
+			Response.json(
+				{
+					error: "invalid_grant",
+					error_description: "Token has been expired or revoked.",
+				},
+				{ status: 400 },
+			),
+		);
+		const error = await new PublisherMailClient(dir, "x", fetchFn)
+			.authenticate()
+			.catch((e) => e);
+		expect(error).toBeInstanceOf(OAuthRefreshError);
+		expect(error.code).toBe("invalid_grant");
+		expect(error.message).not.toContain("revoked");
+		expect(fetchFn).toHaveBeenCalledTimes(1);
 	});
 	it("verifies the OAuth mailbox identity before reading mail", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "publisher-test-"));
