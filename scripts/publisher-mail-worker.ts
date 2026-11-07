@@ -20,6 +20,19 @@ process.umask(0o077);
 const dir = "/private-mail";
 const statePath = join(dir, "state.json");
 const logger = createLogger("publisher-mail");
+// Only an OAuth app in Google's "Testing" status has expiring grants (7 days).
+// Opt in by writing the lifetime in days to this host-owned file; absent or
+// invalid means the app is published and no renewal warning is needed.
+function grantLifetimeDays(): number | undefined {
+	try {
+		const days = Number(
+			readFileSync(join(dir, "grant-lifetime-days"), "utf8").trim(),
+		);
+		return Number.isFinite(days) && days > 0 ? days : undefined;
+	} catch {
+		return undefined;
+	}
+}
 if (process.argv.includes("--health")) {
 	if (!existsSync(join(dir, "enabled"))) process.exit(0);
 	try {
@@ -55,16 +68,15 @@ const health = createHealthMonitor({
 				"an OAuth error needs `python3 scripts/reauth-publisher-mail.py` on the host (OAuth app must be In production, not Testing, or tokens expire after 7 days); otherwise check `docker compose logs publisher-mail`.",
 			maxSilenceMs: 3_600_000,
 		},
-		// The OAuth app must stay in "Testing", so the grant expires every 7
-		// days; warn ahead of time instead of only after mail stops.
+		// Used only when grant-lifetime-days is set (OAuth app in "Testing").
 		"publisher-mail-grant": {
 			title: "Gmail OAuth grant",
 			failingLabel: "due for renewal",
 			recoveredLabel: "renewed",
 			impact:
-				"The grant expires 7 days after consent (Testing-mode limit); after that reader mail stops being processed.",
+				"The OAuth app is in Testing, so the grant expires a fixed number of days after consent; after that reader mail stops being processed.",
 			remedy:
-				"run `python3 scripts/reauth-publisher-mail.py` in an interactive host terminal.",
+				"run `python3 scripts/reauth-publisher-mail.py` in an interactive host terminal (or publish the OAuth app and delete .publisher-mail-private/grant-lifetime-days).",
 		},
 	},
 	failureThreshold: 3,
@@ -113,23 +125,32 @@ if (process.argv.includes("--check")) {
 					{ permanent: isPermanentOAuthError(code) },
 				);
 			}
-			try {
-				const grant = grantRenewalStatus(
-					statSync(join(dir, "google_token.json")).mtimeMs,
-					Date.now(),
-				);
-				const expires = new Date(grant.expiresAt)
-					.toISOString()
-					.slice(0, 16)
-					.replace("T", " ");
-				if (grant.due)
-					health.fail("publisher-mail-grant", `expires ${expires} UTC`, {
-						permanent: true,
-					});
-				else health.ok("publisher-mail-grant");
-			} catch {
-				// A missing token file already fails the mail cycle check.
-			}
+			const lifetimeDays = grantLifetimeDays();
+			if (lifetimeDays === undefined) {
+				// Published app: grants don't expire on a schedule. Clearing the
+				// check only announces "renewed" if a warning was actually sent.
+				health.ok("publisher-mail-grant");
+			} else
+				try {
+					const lifetimeMs = lifetimeDays * 86_400_000;
+					const grant = grantRenewalStatus(
+						statSync(join(dir, "google_token.json")).mtimeMs,
+						Date.now(),
+						lifetimeMs,
+						Math.min(36 * 3_600_000, lifetimeMs / 2),
+					);
+					const expires = new Date(grant.expiresAt)
+						.toISOString()
+						.slice(0, 16)
+						.replace("T", " ");
+					if (grant.due)
+						health.fail("publisher-mail-grant", `expires ${expires} UTC`, {
+							permanent: true,
+						});
+					else health.ok("publisher-mail-grant");
+				} catch {
+					// A missing token file already fails the mail cycle check.
+				}
 			await health.tick();
 		}
 		await new Promise((resolve) => setTimeout(resolve, 300000));
