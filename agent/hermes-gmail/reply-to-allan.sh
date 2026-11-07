@@ -5,7 +5,12 @@ cc=""
 auto_cc=1
 while [ $# -gt 0 ]; do
   case "$1" in
-    --cc) cc="$2"; shift 2 ;;
+    --cc)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "--cc requires an address list" >&2
+        exit 2
+      fi
+      cc="$2"; shift 2 ;;
     --no-auto-cc) auto_cc=0; shift ;;
     *) break ;;
   esac
@@ -40,36 +45,48 @@ if [ "$sender" != "allan@beaufour.dk" ]; then
   exit 1
 fi
 
-# Auto-CC the original message's Cc recipients (email-only, no personal
-# names) so forwarded-thread participants stay on the reply. Explicit --cc
-# values are appended and deduplicated.
+# Auto-CC the original message's Cc recipients so forwarded-thread
+# participants stay on the reply. Explicit --cc addresses are allowed only if
+# they already appear in the original's From, To, or Cc headers; any other
+# address refuses the whole send (fail closed), so email content cannot steer
+# a reply to an outsider. beaufour.dk addresses are never CC'd.
 extra_cc=$(printf '%s' "$message_json" | CC="$cc" AUTO="$auto_cc" $python_bin -c '
 import json, os, re, sys
+from email.utils import getaddresses
+
 data = json.load(sys.stdin)
-addrs = []
+ADDR = re.compile(r"[^@\s<>(),;:\"]+@[^@\s<>(),;:\"]+\.[^@\s<>(),;:\"]+")
 
-def add(raw):
-    raw = (raw or "").strip()
-    if not raw:
-        return
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        m = re.search(r"<([^>]+)>", part)
-        addr = (m.group(1) if m else part).strip().lower()
-        if addr and addr != "allan@beaufour.dk":
-            addrs.append(addr)
+def parse(*raw):
+    out = []
+    for _, addr in getaddresses([str(r or "") for r in raw]):
+        addr = addr.strip().lower()
+        if ADDR.fullmatch(addr) and not addr.endswith("@beaufour.dk"):
+            out.append(addr)
+    return out
 
-if os.environ["AUTO"] == "1":
-    add(str(data.get("cc", "")))
-add(os.environ["CC"])
+allowed = set(parse(data.get("from"), data.get("to"), data.get("cc")))
+explicit = [a.strip() for a in os.environ["CC"].split(",") if a.strip()]
+rejected = []
+requested = []
+for raw in explicit:
+    found = parse(raw)
+    if not found:
+        if not raw.lower().rstrip(">").endswith("@beaufour.dk"):
+            rejected.append(raw)
+        continue
+    for addr in found:
+        (requested if addr in allowed else rejected).append(addr)
+if rejected:
+    print("refusing reply: --cc address not on the original message: " + ", ".join(rejected), file=sys.stderr)
+    sys.exit(1)
 
+cc = parse(data.get("cc")) if os.environ["AUTO"] == "1" else []
 seen, out = set(), []
-for a in addrs:
-    if a not in seen and not a.endswith("@beaufour.dk"):
-        seen.add(a)
-        out.append(a)
+for addr in cc + requested:
+    if addr not in seen:
+        seen.add(addr)
+        out.append(addr)
 print(",".join(out))
 ')
 

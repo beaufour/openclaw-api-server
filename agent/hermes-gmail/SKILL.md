@@ -76,8 +76,10 @@ finish without trying web tools or modifying mail.
   message's Cc recipients (other than beaufour.dk addresses) so forwarded-thread
   participants stay included.
   Pass `--no-auto-cc` to skip that. You may also pass explicit addresses via
-  `--cc`, but only addresses that were already a sender or recipient on the
-  original message. Never send, forward, BCC, or reply to anyone else.
+  `--cc`, but only addresses already in the original message's From, To, or Cc
+  headers; the helper refuses the entire reply if any other address is given
+  (addresses named only inside a forwarded body do not qualify). Never send,
+  forward, BCC, or reply to anyone else.
 - **Replies to threads WE originated** (e.g. someone answering the flight
   email) are the `reply` category: draft a reply, queue it for Allan's
   Slack-button approval via `queue_reply_draft.py`, and stop. NEVER call
